@@ -21,7 +21,7 @@ class Settings(BaseSettings):
     proxy_check_url: str = "https://httpbin.org/ip"  # URL для проверки прокси
     
     class Config:
-        env_file = ".env"
+        case_sensitive = False
 
 
 settings = Settings()
