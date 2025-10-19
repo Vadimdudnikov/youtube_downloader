@@ -19,6 +19,13 @@ celery_app.conf.update(
     task_track_started=True,
     task_time_limit=30 * 60,  # 30 минут
     task_soft_time_limit=25 * 60,  # 25 минут
+    task_default_queue='youtube_download',
+    task_queues={
+        'youtube_download': {
+            'exchange': 'youtube_download',
+            'routing_key': 'youtube_download',
+        },
+    },
 )
 
 # Создание папки assets если её нет

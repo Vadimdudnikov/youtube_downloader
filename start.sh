@@ -81,7 +81,7 @@ trap cleanup SIGINT SIGTERM
 
 # Запускаем Celery worker в фоне
 echo "🔄 Запускаем Celery worker..."
-celery -A app.celery_app worker --loglevel=info &
+celery -A app.celery_app worker --loglevel=info --queues=youtube_download --concurrency=2 &
 CELERY_PID=$!
 
 # Ждем немного чтобы Celery запустился
