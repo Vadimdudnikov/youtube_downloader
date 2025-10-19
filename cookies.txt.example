@@ -1,0 +1,12 @@
+# Пример файла cookies для yt-dlp
+# Скопируйте этот файл в cookies.txt и добавьте ваши cookies
+# 
+# Формат файла cookies (Netscape):
+# .youtube.com	TRUE	/	FALSE	1234567890	VISITOR_INFO1_LIVE	your_visitor_info
+# .youtube.com	TRUE	/	FALSE	1234567890	PREF	your_preferences
+# 
+# Для получения cookies:
+# 1. Откройте YouTube в браузере
+# 2. Войдите в аккаунт
+# 3. Используйте расширение для экспорта cookies или скопируйте вручную
+# 4. Сохраните в формате Netscape в файл cookies.txt
