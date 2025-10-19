@@ -17,14 +17,22 @@ class ProxyManager:
         """Получаем список прокси с API"""
         try:
             url = f"{settings.proxy_api_url}{settings.proxy_api_key}"
+            print(f"[PROXY DEBUG] Запрашиваем URL: {url}")
+            print(f"[PROXY DEBUG] API ключ: '{settings.proxy_api_key}'")
+            print(f"[PROXY DEBUG] Длина ключа: {len(settings.proxy_api_key)}")
+            print(f"[PROXY DEBUG] Байты ключа: {settings.proxy_api_key.encode('utf-8')}")
             
             async with aiohttp.ClientSession() as session:
                 async with session.get(url, timeout=10) as response:
+                    print(f"[PROXY DEBUG] Статус ответа: {response.status}")
+                    
                     if response.status == 200:
                         data = await response.json()
+                        print(f"[PROXY DEBUG] Получен ответ от API")
+                        print(f"[PROXY DEBUG] Ключи в ответе: {list(data.keys())}")
                         
                         if 'error' in data:
-                            print(f"Ошибка API прокси: {data['error']}")
+                            print(f"[PROXY DEBUG] Ошибка API прокси: {data['error']}")
                             return []
                         
                         # Парсим ответ в формате {"0": {...}, "1": {...}, ...}
@@ -50,10 +58,13 @@ class ProxyManager:
                         print(f"Получено {len(proxies)} прокси с API")
                         return proxies
                     else:
-                        print(f"Ошибка получения прокси: {response.status}")
+                        response_text = await response.text()
+                        print(f"[PROXY DEBUG] Ошибка HTTP {response.status}: {response_text}")
                         return []
         except Exception as e:
-            print(f"Ошибка при запросе прокси: {e}")
+            print(f"[PROXY DEBUG] Исключение при запросе прокси: {e}")
+            import traceback
+            print(f"[PROXY DEBUG] Traceback: {traceback.format_exc()}")
             return []
     
     async def check_proxy(self, proxy: Dict) -> bool:
@@ -104,6 +115,8 @@ class ProxyManager:
     async def update_working_proxies(self):
         """Обновляем список рабочих прокси"""
         print("Обновляем список прокси...")
+        print(f"[PROXY DEBUG] Настройки из config: {settings.proxy_api_key}")
+        print(f"[PROXY DEBUG] URL из config: {settings.proxy_api_url}")
         proxies = await self.get_proxies_from_api()
         
         if not proxies:
