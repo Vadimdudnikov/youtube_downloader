@@ -75,11 +75,13 @@ async def get_download_status(task_id: str):
                 'download_url': f"/api/v1/download/file/{result.get('file_name')}"
             }
         else:  # FAILURE
+            error_info = task.info if task.info else {}
             response = {
                 'task_id': task_id,
                 'state': task.state,
                 'status': 'error',
-                'error': str(task.info)
+                'error': error_info.get('error', 'Неизвестная ошибка'),
+                'exc_type': error_info.get('exc_type', 'Unknown')
             }
         
         return response

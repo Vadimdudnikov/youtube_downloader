@@ -28,6 +28,20 @@ def download_video_task(self, youtube_url: str):
             'outtmpl': 'assets/%(title)s.%(ext)s',
             'format': 'best[height<=720]',  # Максимум 720p
             'progress_hooks': [lambda d: self.update_progress(d)],
+            'extractor_retries': 3,
+            'fragment_retries': 3,
+            'retries': 3,
+            'socket_timeout': 30,
+            'http_chunk_size': 10485760,  # 10MB chunks
+            'writethumbnail': False,
+            'writeinfojson': False,
+            'writesubtitles': False,
+            'writeautomaticsub': False,
+            'ignoreerrors': False,
+            'no_warnings': False,
+            'extract_flat': False,
+            'age_limit': None,
+            'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
         }
         
         # Добавляем cookies если файл существует
@@ -90,11 +104,21 @@ def download_video_task(self, youtube_url: str):
             proxy_manager.mark_proxy_failed(current_proxy)
             print(f"Прокси помечен как нерабочий из-за ошибки: {e}")
         
+        error_message = str(e)
         self.update_state(
             state='FAILURE',
-            meta={'status': 'Ошибка загрузки', 'error': str(e)}
+            meta={
+                'status': 'Ошибка загрузки', 
+                'error': error_message,
+                'exc_type': type(e).__name__
+            }
         )
-        raise e
+        # Не поднимаем исключение, чтобы избежать проблем с Celery
+        return {
+            'status': 'failed',
+            'error': error_message,
+            'exc_type': type(e).__name__
+        }
 
 def update_progress(self, d):
     """Обновление прогресса загрузки"""

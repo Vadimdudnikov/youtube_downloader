@@ -17,10 +17,12 @@ class ProxyManager:
         """Получаем список прокси с API"""
         try:
             url = f"{settings.proxy_api_url}{settings.proxy_api_key}"
+            
             async with aiohttp.ClientSession() as session:
                 async with session.get(url, timeout=10) as response:
                     if response.status == 200:
                         data = await response.json()
+                        
                         if 'error' in data:
                             print(f"Ошибка API прокси: {data['error']}")
                             return []
@@ -41,8 +43,8 @@ class ProxyManager:
                                         'country': proxy_data.get('country', 'RU'),
                                         'work': proxy_data.get('work', 0)
                                     }
-                                    # Добавляем только прокси, помеченные как рабочие в API
-                                    if proxy_data.get('work', 0) == 1:
+                                    # Добавляем прокси с work=1 (рабочие) или work=2 (проверяем сами)
+                                    if proxy_data.get('work', 0) in [1, 2]:
                                         proxies.append(proxy)
                         
                         print(f"Получено {len(proxies)} прокси с API")

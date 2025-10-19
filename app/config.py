@@ -8,7 +8,7 @@ class Settings(BaseSettings):
     debug: bool = False
     
     # Настройки прокси
-    proxy_api_key: str = "06b260fa67f492ccce35bef63474e800"  # Замените на ваш API ключ
+    proxy_api_key: str = "06b260fa67f492ccce35bef63474e800"  # Ваш API ключ
     proxy_api_url: str = "http://htmlweb.ru/json/proxy/get?country=RU&perpage=100&api_key="
     
     # Настройки файлов
