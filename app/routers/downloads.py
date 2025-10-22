@@ -4,7 +4,7 @@ from pydantic import BaseModel, HttpUrl
 from typing import Optional
 import os
 
-from app.tasks import download_video_task, update_proxies_task
+from app.tasks import download_video_task, update_proxies_task, update_ytdlp_task
 from app.proxy_manager import proxy_manager
 
 router = APIRouter()
@@ -12,6 +12,7 @@ router = APIRouter()
 
 class DownloadRequest(BaseModel):
     youtube_url: HttpUrl
+    audio_only: bool = False
 
 
 class DownloadResponse(BaseModel):
@@ -23,16 +24,17 @@ class DownloadResponse(BaseModel):
 
 @router.post("/download", response_model=DownloadResponse)
 async def download_video(request: DownloadRequest):
-    """Загрузить видео с YouTube"""
+    """Загрузить видео или аудио с YouTube"""
     try:
         # Отправляем задачу в Celery
-        task = download_video_task.delay(str(request.youtube_url))
+        task = download_video_task.delay(str(request.youtube_url), request.audio_only)
         
+        download_type = "аудио" if request.audio_only else "видео"
         return DownloadResponse(
             task_id=task.id,
             youtube_url=str(request.youtube_url),
             status="pending",
-            message="Задача загрузки создана"
+            message=f"Задача загрузки {download_type} создана"
         )
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Ошибка создания задачи: {str(e)}")
@@ -152,3 +154,16 @@ async def update_proxies():
         }
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Ошибка обновления прокси: {str(e)}")
+
+
+@router.post("/ytdlp/update")
+async def update_ytdlp():
+    """Обновить yt-dlp до последней версии"""
+    try:
+        task = update_ytdlp_task.delay()
+        return {
+            "task_id": task.id,
+            "message": "Задача обновления yt-dlp запущена"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Ошибка обновления yt-dlp: {str(e)}")

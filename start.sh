@@ -22,14 +22,14 @@ if ! command -v redis-server &> /dev/null; then
 fi
 
 # Проверяем наличие виртуального окружения
-if [ ! -d "venv_download" ]; then
+if [ ! -d "venv" ]; then
     echo "📦 Создаем виртуальное окружение..."
-    python -m venv venv_download
+    python -m venv venv
 fi
 
 # Активируем виртуальное окружение
 echo "🔧 Активируем виртуальное окружение..."
-source venv_download/bin/activate 2>/dev/null || venv_download\Scripts\activate 2>/dev/null
+source venv/bin/activate 2>/dev/null
 
 # Устанавливаем зависимости
 echo "📥 Устанавливаем зависимости..."
@@ -89,7 +89,7 @@ sleep 3
 
 # Запускаем FastAPI приложение в фоне
 echo "🔄 Запускаем FastAPI приложение..."
-python main.py &
+uvicorn main:app --host 0.0.0.0 --port 3000 --reload &
 FASTAPI_PID=$!
 
 # Ждем немного чтобы FastAPI запустился

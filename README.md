@@ -25,12 +25,20 @@ choco install redis-64
 # Или скачайте с https://redis.io/download
 ```
 
-3. Запустите Redis сервер:
+3. (Для загрузки аудио) Установите FFmpeg:
+```bash
+# Windows (с Chocolatey)
+choco install ffmpeg
+
+# Или скачайте с https://ffmpeg.org/download.html
+```
+
+4. Запустите Redis сервер:
 ```bash
 redis-server
 ```
 
-4. Настройте конфигурацию:
+5. Настройте конфигурацию:
 ```bash
 # Скопируйте пример конфигурации
 cp env_example.txt .env
@@ -39,7 +47,7 @@ cp env_example.txt .env
 PROXY_API_KEY=ваш_api_ключ_здесь
 ```
 
-5. (Опционально) Настройте cookies:
+6. (Опционально) Настройте cookies:
 ```bash
 # Скопируйте пример файла cookies
 cp cookies.txt.example cookies.txt
@@ -64,12 +72,17 @@ python main.py
 ## API Endpoints
 
 ### POST /api/v1/download
-Запустить загрузку видео с YouTube
+Запустить загрузку видео или аудио с YouTube
 ```json
 {
-  "youtube_url": "https://www.youtube.com/watch?v=VIDEO_ID"
+  "youtube_url": "https://www.youtube.com/watch?v=VIDEO_ID",
+  "audio_only": false
 }
 ```
+
+**Параметры:**
+- `youtube_url` (обязательный) - URL видео на YouTube
+- `audio_only` (опциональный, по умолчанию `false`) - если `true`, загружается только аудио в MP3 формате
 
 Ответ:
 ```json
@@ -101,6 +114,9 @@ python main.py
 
 ### POST /api/v1/proxies/update
 Принудительно обновить список прокси
+
+### POST /api/v1/ytdlp/update
+Обновить yt-dlp до последней версии
 
 ## Структура проекта
 
@@ -171,4 +187,35 @@ python test_proxy_integration.py
 
 - Проверяйте статус прокси через `/api/v1/proxies/status`
 - Принудительно обновляйте прокси через `/api/v1/proxies/update`
+- Обновляйте yt-dlp через `/api/v1/ytdlp/update`
 - Следите за логами Celery worker для отладки
+
+## Решение проблем
+
+### Ошибки YouTube (403 Forbidden, Precondition check failed)
+Если возникают ошибки типа "HTTP Error 403: Forbidden" или "Precondition check failed":
+
+1. **Обновите yt-dlp**:
+   ```bash
+   # Через API
+   curl -X POST http://localhost:8000/api/v1/ytdlp/update
+   
+   # Или вручную
+   yt-dlp -U
+   ```
+
+2. **Проверьте версию**:
+   ```bash
+   yt-dlp --version
+   ```
+
+3. **Перезапустите Celery worker** после обновления
+
+### Проблемы с прокси
+- Проверяйте статус прокси через `/api/v1/proxies/status`
+- Обновляйте прокси через `/api/v1/proxies/update`
+- Убедитесь, что API ключ webshare.io корректный
+
+### Проблемы с аудио
+- Убедитесь, что FFmpeg установлен: `ffmpeg -version`
+- Проверьте права доступа к папке `assets/`
