@@ -2,6 +2,7 @@ import asyncio
 import aiohttp
 import json
 import time
+import os
 from typing import List, Dict, Optional
 from app.config import settings
 from app.celery_app import celery_app
@@ -12,18 +13,25 @@ class ProxyManager:
         self.working_proxies: List[Dict] = []
         self.current_proxy_index = 0
         self.last_proxy_update = 0
+        self.proxy_storage_file = settings.proxy_storage_file
         
     async def get_proxies_from_api(self) -> List[Dict]:
-        """Получаем список прокси с API"""
+        """Получаем список прокси с webshare.io API"""
         try:
-            url = f"{settings.proxy_api_url}{settings.proxy_api_key}"
-            print(f"[PROXY DEBUG] Запрашиваем URL: {url}")
+            headers = {"Authorization": f"Token {settings.proxy_api_key}"}
+            params = settings.proxy_api_params.copy()
+            
+            print(f"[PROXY DEBUG] Запрашиваем URL: {settings.proxy_api_url}")
+            print(f"[PROXY DEBUG] Параметры: {params}")
             print(f"[PROXY DEBUG] API ключ: '{settings.proxy_api_key}'")
-            print(f"[PROXY DEBUG] Длина ключа: {len(settings.proxy_api_key)}")
-            print(f"[PROXY DEBUG] Байты ключа: {settings.proxy_api_key.encode('utf-8')}")
             
             async with aiohttp.ClientSession() as session:
-                async with session.get(url, timeout=10) as response:
+                async with session.get(
+                    settings.proxy_api_url, 
+                    headers=headers,
+                    params=params,
+                    timeout=10
+                ) as response:
                     print(f"[PROXY DEBUG] Статус ответа: {response.status}")
                     
                     if response.status == 200:
@@ -35,27 +43,28 @@ class ProxyManager:
                             print(f"[PROXY DEBUG] Ошибка API прокси: {data['error']}")
                             return []
                         
-                        # Парсим ответ в формате {"0": {...}, "1": {...}, ...}
+                        # Парсим ответ webshare.io API
                         proxies = []
-                        for key, proxy_data in data.items():
-                            if key.isdigit() and isinstance(proxy_data, dict):
-                                # Парсим name в формате "ip:port"
-                                name = proxy_data.get('name', '')
-                                if ':' in name:
-                                    ip, port = name.split(':', 1)
-                                    proxy = {
-                                        'ip': ip,
-                                        'port': int(port),
-                                        'type': proxy_data.get('type', 'HTTP'),
-                                        'speed': proxy_data.get('speed', 0),
-                                        'country': proxy_data.get('country', 'RU'),
-                                        'work': proxy_data.get('work', 0)
-                                    }
-                                    # Добавляем прокси с work=1 (рабочие) или work=2 (проверяем сами)
-                                    if proxy_data.get('work', 0) in [1, 2]:
-                                        proxies.append(proxy)
+                        results = data.get('results', [])
                         
-                        print(f"Получено {len(proxies)} прокси с API")
+                        for proxy_data in results:
+                            proxy = {
+                                'ip': proxy_data.get('proxy_address'),
+                                'port': proxy_data.get('port'),
+                                'username': proxy_data.get('username'),
+                                'password': proxy_data.get('password'),
+                                'country': proxy_data.get('country_code', 'US'),
+                                'city': proxy_data.get('city'),
+                                'isp': proxy_data.get('isp'),
+                                'last_checked': proxy_data.get('last_checked'),
+                                'valid': proxy_data.get('valid', True)
+                            }
+                            
+                            # Добавляем только валидные прокси
+                            if proxy['valid'] and proxy['ip'] and proxy['port']:
+                                proxies.append(proxy)
+                        
+                        print(f"Получено {len(proxies)} прокси с webshare.io API")
                         return proxies
                     else:
                         response_text = await response.text()
@@ -65,6 +74,46 @@ class ProxyManager:
             print(f"[PROXY DEBUG] Исключение при запросе прокси: {e}")
             import traceback
             print(f"[PROXY DEBUG] Traceback: {traceback.format_exc()}")
+            return []
+    
+    def save_proxies_to_file(self, proxies: List[Dict]):
+        """Сохраняем прокси в файл"""
+        try:
+            proxy_data = {
+                'proxies': proxies,
+                'saved_at': time.time(),
+                'count': len(proxies)
+            }
+            
+            with open(self.proxy_storage_file, 'w', encoding='utf-8') as f:
+                json.dump(proxy_data, f, ensure_ascii=False, indent=2)
+            
+            print(f"Сохранено {len(proxies)} прокси в файл {self.proxy_storage_file}")
+        except Exception as e:
+            print(f"Ошибка при сохранении прокси в файл: {e}")
+    
+    def load_proxies_from_file(self) -> List[Dict]:
+        """Загружаем прокси из файла"""
+        try:
+            if not os.path.exists(self.proxy_storage_file):
+                print(f"Файл прокси {self.proxy_storage_file} не найден")
+                return []
+            
+            with open(self.proxy_storage_file, 'r', encoding='utf-8') as f:
+                proxy_data = json.load(f)
+            
+            proxies = proxy_data.get('proxies', [])
+            saved_at = proxy_data.get('saved_at', 0)
+            
+            # Проверяем, не устарели ли прокси (старше 24 часов)
+            if time.time() - saved_at > 24 * 3600:
+                print("Сохранённые прокси устарели (старше 24 часов)")
+                return []
+            
+            print(f"Загружено {len(proxies)} прокси из файла")
+            return proxies
+        except Exception as e:
+            print(f"Ошибка при загрузке прокси из файла: {e}")
             return []
     
     async def check_proxy(self, proxy: Dict) -> bool:
@@ -115,6 +164,17 @@ class ProxyManager:
     async def update_working_proxies(self):
         """Обновляем список рабочих прокси"""
         print("Обновляем список прокси...")
+        
+        # Сначала пытаемся загрузить сохранённые прокси
+        saved_proxies = self.load_proxies_from_file()
+        if saved_proxies:
+            print(f"Используем {len(saved_proxies)} сохранённых прокси")
+            self.working_proxies = saved_proxies
+            self.current_proxy_index = 0
+            self.last_proxy_update = time.time()
+            return
+        
+        # Если сохранённых прокси нет, получаем новые с API
         print(f"[PROXY DEBUG] Настройки из config: {settings.proxy_api_key}")
         print(f"[PROXY DEBUG] URL из config: {settings.proxy_api_url}")
         proxies = await self.get_proxies_from_api()
@@ -123,11 +183,15 @@ class ProxyManager:
             print("Не удалось получить прокси с API")
             return
         
-        self.working_proxies = await self.check_all_proxies(proxies)
-        self.current_proxy_index = 0
-        self.last_proxy_update = time.time()
+        # Проверяем полученные прокси
+        working_proxies = await self.check_all_proxies(proxies)
         
-        if self.working_proxies:
+        if working_proxies:
+            # Сохраняем рабочие прокси в файл
+            self.save_proxies_to_file(working_proxies)
+            self.working_proxies = working_proxies
+            self.current_proxy_index = 0
+            self.last_proxy_update = time.time()
             print(f"Обновлено {len(self.working_proxies)} рабочих прокси")
         else:
             print("Не найдено рабочих прокси")
@@ -147,6 +211,10 @@ class ProxyManager:
             self.working_proxies.remove(proxy)
             print(f"Прокси {proxy.get('ip')}:{proxy.get('port')} помечен как нерабочий")
             
+            # Обновляем сохранённый файл
+            if self.working_proxies:
+                self.save_proxies_to_file(self.working_proxies)
+            
             # Если прокси закончились, обновляем список
             if not self.working_proxies:
                 print("Все прокси закончились, обновляем список...")
@@ -163,6 +231,7 @@ class ProxyManager:
         if not proxy:
             return None
         
+        # webshare.io прокси всегда требуют аутентификацию
         if proxy.get('username') and proxy.get('password'):
             return f"http://{proxy['username']}:{proxy['password']}@{proxy['ip']}:{proxy['port']}"
         else:
