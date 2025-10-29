@@ -164,10 +164,11 @@ def download_video_task(self, youtube_url: str, audio_only: bool = False):
                     }
                 )
     
-    # Инициализируем current_proxy в самом начале, чтобы она была доступна в блоке except
+    # Инициализируем current_proxy до try блока, чтобы она точно была доступна в except
     current_proxy = None
     
     try:
+        
         # Проверяем и обновляем yt-dlp
         check_and_update_ytdlp()
         
@@ -190,15 +191,33 @@ def download_video_task(self, youtube_url: str, audio_only: bool = False):
             asyncio.run(proxy_manager.update_working_proxies())
         
         # Получаем прокси объект для отслеживания
-        proxy_obj = proxy_manager.get_next_proxy()
+        proxy_obj = None
         proxy_url = None
+        try:
+            proxy_obj = proxy_manager.get_next_proxy()
+            if proxy_obj:
+                print(f"[PROXY] Получен прокси: IP={proxy_obj.get('ip')}, Port={proxy_obj.get('port')}, Country={proxy_obj.get('country')}, City={proxy_obj.get('city')}")
+            else:
+                print(f"[PROXY] Прокси не получен: список прокси пуст или недоступен")
+        except Exception as proxy_error:
+            print(f"[PROXY ERROR] Ошибка при получении прокси: {proxy_error}")
+            import traceback
+            print(f"[PROXY ERROR] Traceback: {traceback.format_exc()}")
+            proxy_obj = None
+        
         if proxy_obj:
             # Создаем URL прокси для yt-dlp
             if proxy_obj.get('username') and proxy_obj.get('password'):
                 proxy_url = f"http://{proxy_obj['username']}:{proxy_obj['password']}@{proxy_obj['ip']}:{proxy_obj['port']}"
+                print(f"[PROXY] Используем прокси с авторизацией: {proxy_obj['ip']}:{proxy_obj['port']}")
             else:
                 proxy_url = f"http://{proxy_obj['ip']}:{proxy_obj['port']}"
+                print(f"[PROXY] Используем прокси без авторизации: {proxy_obj['ip']}:{proxy_obj['port']}")
             current_proxy = proxy_obj
+        else:
+            # Убеждаемся, что current_proxy явно установлена в None если прокси нет
+            current_proxy = None
+            print(f"[PROXY] Прокси не используется для этой загрузки")
         
         # Извлекаем YouTube ID для имени файла
         youtube_id = extract_youtube_id(youtube_url)
@@ -400,9 +419,14 @@ def download_video_task(self, youtube_url: str, audio_only: bool = False):
                 
     except Exception as e:
         # Если ошибка связана с прокси, помечаем его как нерабочий
-        if current_proxy and ("proxy" in str(e).lower() or "connection" in str(e).lower()):
-            proxy_manager.mark_proxy_failed(current_proxy)
-            print(f"Прокси помечен как нерабочий из-за ошибки: {e}")
+        # Используем проверку на наличие переменной через locals() для безопасности
+        try:
+            if current_proxy is not None and ("proxy" in str(e).lower() or "connection" in str(e).lower()):
+                proxy_manager.mark_proxy_failed(current_proxy)
+                print(f"Прокси помечен как нерабочий из-за ошибки: {e}")
+        except (UnboundLocalError, NameError):
+            # Переменная current_proxy не была инициализирована
+            pass
         
         error_message = str(e)
         self.update_state(

@@ -37,6 +37,7 @@ class ProxyManager:
                     if response.status == 200:
                         data = await response.json()
                         print(f"[PROXY DEBUG] Получен ответ от API")
+                        print(f"[PROXY DEBUG] Полный ответ API: {json.dumps(data, indent=2, ensure_ascii=False)}")
                         print(f"[PROXY DEBUG] Ключи в ответе: {list(data.keys())}")
                         
                         if 'error' in data:
@@ -67,8 +68,14 @@ class ProxyManager:
                         print(f"Получено {len(proxies)} прокси с webshare.io API")
                         return proxies
                     else:
-                        response_text = await response.text()
-                        print(f"[PROXY DEBUG] Ошибка HTTP {response.status}: {response_text}")
+                        print(f"[PROXY DEBUG] Ошибка HTTP {response.status}")
+                        try:
+                            error_data = await response.json()
+                            print(f"[PROXY DEBUG] JSON ответ при ошибке: {json.dumps(error_data, indent=2, ensure_ascii=False)}")
+                        except:
+                            # Если не JSON, читаем как текст
+                            response_text = await response.text()
+                            print(f"[PROXY DEBUG] Полный текст ответа при ошибке: {response_text}")
                         return []
         except Exception as e:
             print(f"[PROXY DEBUG] Исключение при запросе прокси: {e}")
@@ -175,16 +182,21 @@ class ProxyManager:
             return
         
         # Если сохранённых прокси нет, получаем новые с API
-        print(f"[PROXY DEBUG] Настройки из config: {settings.proxy_api_key}")
-        print(f"[PROXY DEBUG] URL из config: {settings.proxy_api_url}")
+        print(f"[PROXY] Запрашиваем прокси с API...")
+        print(f"[PROXY DEBUG] Настройки из config: API ключ='{settings.proxy_api_key[:10]}...', URL={settings.proxy_api_url}")
         proxies = await self.get_proxies_from_api()
         
+        print(f"[PROXY] Получено с API: {len(proxies)} прокси")
+        
         if not proxies:
-            print("Не удалось получить прокси с API")
+            print("[PROXY ERROR] Не удалось получить прокси с API")
             return
         
         # Проверяем полученные прокси
+        print(f"[PROXY] Начинаем проверку {len(proxies)} прокси на работоспособность...")
         working_proxies = await self.check_all_proxies(proxies)
+        
+        print(f"[PROXY] Результаты проверки: {len(working_proxies)} рабочих из {len(proxies)} проверенных")
         
         if working_proxies:
             # Сохраняем рабочие прокси в файл
@@ -192,20 +204,23 @@ class ProxyManager:
             self.working_proxies = working_proxies
             self.current_proxy_index = 0
             self.last_proxy_update = time.time()
-            print(f"Обновлено {len(self.working_proxies)} рабочих прокси")
+            print(f"[PROXY] Обновлено: {len(self.working_proxies)} рабочих прокси сохранено и готово к использованию")
         else:
-            print("Не найдено рабочих прокси")
+            print("[PROXY ERROR] Не найдено рабочих прокси после проверки")
     
     def get_next_proxy(self) -> Optional[Dict]:
         """Получаем следующий рабочий прокси"""
         if not self.working_proxies:
+            print(f"[PROXY] get_next_proxy: список прокси пуст (всего прокси: 0)")
             return None
         
         # Проверяем, что индекс валиден (на случай если список изменился)
         if self.current_proxy_index >= len(self.working_proxies):
+            print(f"[PROXY] get_next_proxy: индекс {self.current_proxy_index} превышает длину списка {len(self.working_proxies)}, сбрасываем на 0")
             self.current_proxy_index = 0
         
         proxy = self.working_proxies[self.current_proxy_index]
+        print(f"[PROXY] get_next_proxy: возвращаем прокси #{self.current_proxy_index} из {len(self.working_proxies)} (IP: {proxy.get('ip')}:{proxy.get('port')})")
         self.current_proxy_index = (self.current_proxy_index + 1) % len(self.working_proxies)
         return proxy
     
