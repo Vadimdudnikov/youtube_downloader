@@ -210,35 +210,64 @@ class ProxyManager:
     
     def get_next_proxy(self) -> Optional[Dict]:
         """Получаем следующий рабочий прокси"""
-        if not self.working_proxies:
-            print(f"[PROXY] get_next_proxy: список прокси пуст (всего прокси: 0)")
-            return None
-        
-        # Проверяем, что индекс валиден (на случай если список изменился)
-        if self.current_proxy_index >= len(self.working_proxies):
-            print(f"[PROXY] get_next_proxy: индекс {self.current_proxy_index} превышает длину списка {len(self.working_proxies)}, сбрасываем на 0")
+        try:
+            if not self.working_proxies:
+                print(f"[PROXY] get_next_proxy: список прокси пуст (всего прокси: 0)")
+                return None
+            
+            # Проверяем, что индекс валиден (на случай если список изменился)
+            if self.current_proxy_index >= len(self.working_proxies):
+                print(f"[PROXY] get_next_proxy: индекс {self.current_proxy_index} превышает длину списка {len(self.working_proxies)}, сбрасываем на 0")
+                self.current_proxy_index = 0
+            
+            # Дополнительная проверка на случай если список стал пустым между проверками
+            if not self.working_proxies:
+                print(f"[PROXY] get_next_proxy: список прокси стал пустым после проверки индекса")
+                return None
+            
+            proxy = self.working_proxies[self.current_proxy_index]
+            print(f"[PROXY] get_next_proxy: возвращаем прокси #{self.current_proxy_index} из {len(self.working_proxies)} (IP: {proxy.get('ip')}:{proxy.get('port')})")
+            self.current_proxy_index = (self.current_proxy_index + 1) % len(self.working_proxies)
+            return proxy
+        except (IndexError, AttributeError) as e:
+            print(f"[PROXY ERROR] Ошибка при получении прокси: {e}")
+            print(f"[PROXY ERROR] Длина списка: {len(self.working_proxies) if self.working_proxies else 0}, индекс: {self.current_proxy_index}")
+            # Сбрасываем индекс для безопасности
             self.current_proxy_index = 0
-        
-        proxy = self.working_proxies[self.current_proxy_index]
-        print(f"[PROXY] get_next_proxy: возвращаем прокси #{self.current_proxy_index} из {len(self.working_proxies)} (IP: {proxy.get('ip')}:{proxy.get('port')})")
-        self.current_proxy_index = (self.current_proxy_index + 1) % len(self.working_proxies)
-        return proxy
+            return None
     
     def mark_proxy_failed(self, proxy: Dict):
         """Помечаем прокси как нерабочий и удаляем из списка"""
-        if proxy in self.working_proxies:
-            self.working_proxies.remove(proxy)
-            print(f"Прокси {proxy.get('ip')}:{proxy.get('port')} помечен как нерабочий")
-            
-            # Обновляем сохранённый файл
-            if self.working_proxies:
-                self.save_proxies_to_file(self.working_proxies)
-            
-            # Если прокси закончились, обновляем список
-            if not self.working_proxies:
-                print("Все прокси закончились, обновляем список...")
-                # Запускаем обновление асинхронно
-                asyncio.create_task(self.update_working_proxies())
+        try:
+            if not proxy:
+                print(f"[PROXY] mark_proxy_failed: передан пустой прокси")
+                return
+                
+            if proxy in self.working_proxies:
+                self.working_proxies.remove(proxy)
+                print(f"[PROXY] Прокси {proxy.get('ip')}:{proxy.get('port')} помечен как нерабочий и удален из списка")
+                
+                # Сбрасываем индекс если он стал невалидным
+                if self.current_proxy_index >= len(self.working_proxies):
+                    print(f"[PROXY] Индекс прокси сброшен до 0 (было {self.current_proxy_index}, осталось {len(self.working_proxies)} прокси)")
+                    self.current_proxy_index = 0
+                
+                # Обновляем сохранённый файл
+                if self.working_proxies:
+                    self.save_proxies_to_file(self.working_proxies)
+                
+                # Если прокси закончились, обновляем список
+                if not self.working_proxies:
+                    print("[PROXY] Все прокси закончились, обновляем список...")
+                    # Запускаем обновление асинхронно
+                    asyncio.create_task(self.update_working_proxies())
+            else:
+                print(f"[PROXY] Прокси {proxy.get('ip')}:{proxy.get('port')} не найден в списке (возможно уже удален)")
+        except ValueError as e:
+            print(f"[PROXY ERROR] Ошибка при удалении прокси: {e}")
+            print(f"[PROXY ERROR] Прокси не найден в списке, возможно уже был удален")
+        except Exception as e:
+            print(f"[PROXY ERROR] Неожиданная ошибка при пометке прокси как нерабочего: {e}")
     
     def should_update_proxies(self) -> bool:
         """Проверяем, нужно ли обновить прокси"""

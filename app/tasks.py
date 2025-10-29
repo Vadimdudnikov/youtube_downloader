@@ -168,7 +168,6 @@ def download_video_task(self, youtube_url: str, audio_only: bool = False):
     current_proxy = None
     
     try:
-        
         # Проверяем и обновляем yt-dlp
         check_and_update_ytdlp()
         
@@ -193,6 +192,8 @@ def download_video_task(self, youtube_url: str, audio_only: bool = False):
         # Получаем прокси объект для отслеживания
         proxy_obj = None
         proxy_url = None
+        # current_proxy уже инициализирована выше как None
+        
         try:
             proxy_obj = proxy_manager.get_next_proxy()
             if proxy_obj:
@@ -205,6 +206,7 @@ def download_video_task(self, youtube_url: str, audio_only: bool = False):
             print(f"[PROXY ERROR] Traceback: {traceback.format_exc()}")
             proxy_obj = None
         
+        # Всегда устанавливаем current_proxy, даже если proxy_obj = None
         if proxy_obj:
             # Создаем URL прокси для yt-dlp
             if proxy_obj.get('username') and proxy_obj.get('password'):
