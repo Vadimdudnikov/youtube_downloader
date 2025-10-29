@@ -201,6 +201,10 @@ class ProxyManager:
         if not self.working_proxies:
             return None
         
+        # Проверяем, что индекс валиден (на случай если список изменился)
+        if self.current_proxy_index >= len(self.working_proxies):
+            self.current_proxy_index = 0
+        
         proxy = self.working_proxies[self.current_proxy_index]
         self.current_proxy_index = (self.current_proxy_index + 1) % len(self.working_proxies)
         return proxy

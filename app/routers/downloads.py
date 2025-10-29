@@ -54,16 +54,25 @@ async def get_download_status(task_id: str):
                 'progress': 0
             }
         elif task.state == 'PROGRESS':
+            # Проверяем, что task.info является словарем
+            if isinstance(task.info, dict):
+                info = task.info
+            else:
+                info = {}
             response = {
                 'task_id': task_id,
                 'state': task.state,
-                'status': task.info.get('status', 'Загружаем...'),
-                'progress': task.info.get('progress', 0),
-                'title': task.info.get('title'),
-                'duration': task.info.get('duration')
+                'status': info.get('status', 'Загружаем...'),
+                'progress': info.get('progress', 0),
+                'title': info.get('title'),
+                'duration': info.get('duration')
             }
         elif task.state == 'SUCCESS':
-            result = task.result
+            # Проверяем, что task.result является словарем
+            if isinstance(task.result, dict):
+                result = task.result
+            else:
+                result = {}
             response = {
                 'task_id': task_id,
                 'state': task.state,
@@ -74,10 +83,18 @@ async def get_download_status(task_id: str):
                 'file_size': result.get('file_size'),
                 'title': result.get('title'),
                 'duration': result.get('duration'),
-                'download_url': f"/api/v1/download/file/{result.get('file_name')}"
+                'download_url': f"/api/v1/download/file/{result.get('file_name')}" if result.get('file_name') else None
             }
         else:  # FAILURE
-            error_info = task.info if task.info else {}
+            # Проверяем, что task.info является словарем
+            if isinstance(task.info, dict):
+                error_info = task.info
+            else:
+                # Если task.info это исключение, извлекаем информацию из него
+                error_info = {
+                    'error': str(task.info) if task.info else 'Неизвестная ошибка',
+                    'exc_type': type(task.info).__name__ if task.info else 'Unknown'
+                }
             response = {
                 'task_id': task_id,
                 'state': task.state,

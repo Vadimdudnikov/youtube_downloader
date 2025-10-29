@@ -57,6 +57,55 @@ def extract_youtube_id(url: str) -> str:
     return hashlib.md5(url.encode()).hexdigest()[:11]
 
 
+def is_authentication_error(error_message: str) -> bool:
+    """Проверяем, является ли ошибка связанной с аутентификацией"""
+    auth_keywords = [
+        'sign in to confirm',
+        'please sign in',
+        'authentication required',
+        'login required',
+        'cookies',
+        'age verification',
+        'age-restricted',
+        'private video',
+        'members-only',
+        'premium content',
+        'subscription required'
+    ]
+    
+    error_lower = error_message.lower()
+    return any(keyword in error_lower for keyword in auth_keywords)
+
+
+def download_with_retry(ydl_opts: dict, youtube_url: str, use_cookies: bool = False) -> dict:
+    """Загружаем видео с возможностью повторной попытки с куки"""
+    try:
+        if use_cookies and os.path.exists(settings.cookies_file):
+            ydl_opts['cookiefile'] = settings.cookies_file
+            print(f"Повторная попытка с cookies из файла: {settings.cookies_file}")
+        
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            # Получаем информацию о видео
+            info = ydl.extract_info(youtube_url, download=False)
+            video_title = info.get('title', 'Unknown')
+            video_duration = info.get('duration', 0)
+            
+            # Загружаем видео или аудио
+            ydl.download([youtube_url])
+            
+            return {
+                'success': True,
+                'title': video_title,
+                'duration': video_duration
+            }
+    except Exception as e:
+        return {
+            'success': False,
+            'error': str(e),
+            'error_type': type(e).__name__
+        }
+
+
 def check_and_update_ytdlp():
     """Проверяем и обновляем yt-dlp если необходимо"""
     try:
@@ -115,6 +164,9 @@ def download_video_task(self, youtube_url: str, audio_only: bool = False):
                     }
                 )
     
+    # Инициализируем current_proxy в самом начале, чтобы она была доступна в блоке except
+    current_proxy = None
+    
     try:
         # Проверяем и обновляем yt-dlp
         check_and_update_ytdlp()
@@ -137,9 +189,16 @@ def download_video_task(self, youtube_url: str, audio_only: bool = False):
         if proxy_manager.should_update_proxies():
             asyncio.run(proxy_manager.update_working_proxies())
         
-        # Получаем прокси
-        proxy_url = proxy_manager.get_proxy_for_ytdlp()
-        current_proxy = None
+        # Получаем прокси объект для отслеживания
+        proxy_obj = proxy_manager.get_next_proxy()
+        proxy_url = None
+        if proxy_obj:
+            # Создаем URL прокси для yt-dlp
+            if proxy_obj.get('username') and proxy_obj.get('password'):
+                proxy_url = f"http://{proxy_obj['username']}:{proxy_obj['password']}@{proxy_obj['ip']}:{proxy_obj['port']}"
+            else:
+                proxy_url = f"http://{proxy_obj['ip']}:{proxy_obj['port']}"
+            current_proxy = proxy_obj
         
         # Извлекаем YouTube ID для имени файла
         youtube_id = extract_youtube_id(youtube_url)
@@ -250,74 +309,94 @@ def download_video_task(self, youtube_url: str, audio_only: bool = False):
                 }
             }
         
-        # Добавляем cookies если файл существует
-        if os.path.exists(settings.cookies_file):
-            ydl_opts['cookiefile'] = settings.cookies_file
-            print(f"Используем cookies из файла: {settings.cookies_file}")
+        # Куки будут добавлены только при ошибке аутентификации
         
         # Добавляем прокси если доступен
         if proxy_url:
             ydl_opts['proxy'] = proxy_url
-            current_proxy = proxy_manager.get_next_proxy()
             print(f"Используем прокси: {proxy_url}")
         
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            # Получаем информацию о видео
-            info = ydl.extract_info(youtube_url, download=False)
-            video_title = info.get('title', 'Unknown')
-            video_duration = info.get('duration', 0)
+        # Первая попытка загрузки без куки
+        download_type = "аудио" if audio_only else "видео"
+        self.update_state(
+            state='PROGRESS', 
+            meta={
+                'status': f'Начинаем загрузку {download_type}...',
+                'progress': 5
+            }
+        )
+        
+        result = download_with_retry(ydl_opts, youtube_url, use_cookies=False)
+        
+        # Если первая попытка не удалась и ошибка связана с аутентификацией, пробуем с куки
+        if not result['success'] and is_authentication_error(result['error']):
+            print(f"Обнаружена ошибка аутентификации: {result['error']}")
+            print("Пробуем повторную загрузку с куки...")
             
-            download_type = "аудио" if audio_only else "видео"
             self.update_state(
                 state='PROGRESS', 
                 meta={
-                    'status': f'Загружаем {download_type}: {video_title}',
-                    'progress': 10,
-                    'title': video_title,
-                    'duration': video_duration
+                    'status': f'Повторная попытка загрузки {download_type} с куки...',
+                    'progress': 10
                 }
             )
             
-            # Загружаем видео или аудио
-            ydl.download([youtube_url])
-            
-            # Ищем загруженный файл по YouTube ID
-            downloaded_file = None
-            
-            for file in os.listdir('assets'):
-                # Для аудио ищем .mp3 файлы с YouTube ID, для видео - любые файлы с YouTube ID
-                if audio_only:
-                    if file.startswith(youtube_id) and file.endswith('.mp3'):
-                        downloaded_file = file
-                        break
-                else:
-                    if file.startswith(youtube_id):
-                        downloaded_file = file
-                        break
-            
-            if downloaded_file:
-                file_path = os.path.join('assets', downloaded_file)
-                file_size = os.path.getsize(file_path)
-                
-                return {
-                    'status': 'completed',
-                    'progress': 100,
-                    'message': f'{download_type.capitalize()} успешно загружено',
-                    'file_path': file_path,
-                    'file_name': downloaded_file,
-                    'file_size': file_size,
-                    'title': video_title,
-                    'duration': video_duration,
-                    'download_type': download_type,
-                    'youtube_id': youtube_id,
-                    'cached': False
-                }
+            result = download_with_retry(ydl_opts, youtube_url, use_cookies=True)
+        
+        # Если обе попытки не удались, поднимаем исключение
+        if not result['success']:
+            raise Exception(result['error'])
+        
+        video_title = result['title']
+        video_duration = result['duration']
+        
+        self.update_state(
+            state='PROGRESS', 
+            meta={
+                'status': f'{download_type.capitalize()} загружено: {video_title}',
+                'progress': 90,
+                'title': video_title,
+                'duration': video_duration
+            }
+        )
+        
+        # Ищем загруженный файл по YouTube ID
+        downloaded_file = None
+        
+        for file in os.listdir('assets'):
+            # Для аудио ищем .mp3 файлы с YouTube ID, для видео - любые файлы с YouTube ID
+            if audio_only:
+                if file.startswith(youtube_id) and file.endswith('.mp3'):
+                    downloaded_file = file
+                    break
             else:
-                # Если файл не найден, выводим список файлов для отладки
-                files_in_assets = os.listdir('assets')
-                print(f"Файлы в папке assets: {files_in_assets}")
-                print(f"Ищем файл с префиксом: {youtube_id}")
-                raise Exception(f"Файл не найден после загрузки. YouTube ID: {youtube_id}")
+                if file.startswith(youtube_id):
+                    downloaded_file = file
+                    break
+        
+        if downloaded_file:
+            file_path = os.path.join('assets', downloaded_file)
+            file_size = os.path.getsize(file_path)
+            
+            return {
+                'status': 'completed',
+                'progress': 100,
+                'message': f'{download_type.capitalize()} успешно загружено',
+                'file_path': file_path,
+                'file_name': downloaded_file,
+                'file_size': file_size,
+                'title': video_title,
+                'duration': video_duration,
+                'download_type': download_type,
+                'youtube_id': youtube_id,
+                'cached': False
+            }
+        else:
+            # Если файл не найден, выводим список файлов для отладки
+            files_in_assets = os.listdir('assets')
+            print(f"Файлы в папке assets: {files_in_assets}")
+            print(f"Ищем файл с префиксом: {youtube_id}")
+            raise Exception(f"Файл не найден после загрузки. YouTube ID: {youtube_id}")
                 
     except Exception as e:
         # Если ошибка связана с прокси, помечаем его как нерабочий
