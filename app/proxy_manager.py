@@ -125,12 +125,17 @@ class ProxyManager:
     
     async def check_proxy(self, proxy: Dict) -> bool:
         """Проверяем работоспособность прокси"""
+        proxy_id = f"{proxy.get('ip', 'unknown')}:{proxy.get('port', 'unknown')}"
         try:
+            print(f"[PROXY CHECK] Начинаем проверку прокси {proxy_id}")
             proxy_url = f"http://{proxy['ip']}:{proxy['port']}"
             proxy_auth = None
             
             if proxy.get('username') and proxy.get('password'):
                 proxy_auth = aiohttp.BasicAuth(proxy['username'], proxy['password'])
+                print(f"[PROXY CHECK] Прокси {proxy_id} с авторизацией")
+            else:
+                print(f"[PROXY CHECK] Прокси {proxy_id} без авторизации")
             
             connector = aiohttp.TCPConnector()
             timeout = aiohttp.ClientTimeout(total=settings.proxy_check_timeout)
@@ -146,26 +151,58 @@ class ProxyManager:
                 ) as response:
                     if response.status == 200:
                         result = await response.json()
-                        print(f"Прокси {proxy['ip']}:{proxy['port']} работает. IP: {result.get('origin', 'unknown')}")
+                        print(f"[PROXY CHECK] ✓ Прокси {proxy_id} работает. IP: {result.get('origin', 'unknown')}")
                         return True
-                    return False
+                    else:
+                        print(f"[PROXY CHECK] ✗ Прокси {proxy_id} вернул статус {response.status}")
+                        return False
+        except asyncio.TimeoutError:
+            print(f"[PROXY CHECK] ✗ Прокси {proxy_id} не работает: таймаут ({settings.proxy_check_timeout} сек)")
+            return False
+        except aiohttp.ClientError as e:
+            print(f"[PROXY CHECK] ✗ Прокси {proxy_id} не работает (ClientError): {str(e)[:100]}")
+            return False
         except Exception as e:
-            print(f"Прокси {proxy.get('ip', 'unknown')}:{proxy.get('port', 'unknown')} не работает: {e}")
+            print(f"[PROXY CHECK] ✗ Прокси {proxy_id} не работает (Exception): {type(e).__name__}: {str(e)[:100]}")
             return False
     
     async def check_all_proxies(self, proxies: List[Dict]) -> List[Dict]:
         """Проверяем все прокси параллельно"""
-        print(f"Проверяем {len(proxies)} прокси...")
+        print(f"[PROXY CHECK] Начинаем проверку {len(proxies)} прокси параллельно...")
         
         tasks = [self.check_proxy(proxy) for proxy in proxies]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        print(f"[PROXY CHECK] Создано {len(tasks)} задач для проверки")
+        
+        try:
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            print(f"[PROXY CHECK] Получено {len(results)} результатов из {len(tasks)} задач")
+        except Exception as e:
+            print(f"[PROXY CHECK ERROR] Ошибка при выполнении gather: {e}")
+            import traceback
+            print(f"[PROXY CHECK ERROR] Traceback: {traceback.format_exc()}")
+            return []
         
         working_proxies = []
-        for i, result in enumerate(results):
-            if result is True:
-                working_proxies.append(proxies[i])
+        exceptions_count = 0
+        false_count = 0
         
-        print(f"Найдено {len(working_proxies)} рабочих прокси из {len(proxies)}")
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                exceptions_count += 1
+                print(f"[PROXY CHECK] Задача {i} вернула исключение: {type(result).__name__}: {result}")
+            elif result is True:
+                working_proxies.append(proxies[i])
+            elif result is False:
+                false_count += 1
+            else:
+                print(f"[PROXY CHECK] Задача {i} вернула неожиданный результат: {result} (type: {type(result)})")
+        
+        print(f"[PROXY CHECK] Итоги проверки:")
+        print(f"[PROXY CHECK]   - Рабочих: {len(working_proxies)}")
+        print(f"[PROXY CHECK]   - Не работают: {false_count}")
+        print(f"[PROXY CHECK]   - Исключения: {exceptions_count}")
+        print(f"[PROXY CHECK]   - Всего проверено: {len(working_proxies) + false_count + exceptions_count} из {len(proxies)}")
+        
         return working_proxies
     
     async def update_working_proxies(self):
