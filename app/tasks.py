@@ -12,6 +12,9 @@ from app.config import settings
 import whisper
 import torch
 
+# Глобальный кэш для моделей Whisper (чтобы не загружать каждый раз)
+_whisper_models_cache = {}
+
 
 def ensure_directories():
     """Создает необходимые директории если их нет"""
@@ -829,28 +832,51 @@ def create_srt_task(self, youtube_url: str, model_size: str = "medium"):
         if device == "cuda":
             print(f"Используем GPU: {torch.cuda.get_device_name(0)}")
             print(f"CUDA версия: {torch.version.cuda}")
+            # Оптимизируем для GPU
+            torch.backends.cudnn.benchmark = True
         else:
             print("GPU не доступен, используем CPU")
         
-        print(f"Загружаем модель Whisper: {model_size} на устройстве: {device}")
-        model = whisper.load_model(model_size, device=device)
+        # Кэшируем модель Whisper (загружаем только один раз)
+        cache_key = f"{model_size}_{device}"
+        if cache_key not in _whisper_models_cache:
+            print(f"Загружаем модель Whisper: {model_size} на устройстве: {device} (первая загрузка, будет кэширована)")
+            self.update_state(
+                state='PROGRESS',
+                meta={'status': f'Загружаем модель Whisper ({model_size})...', 'progress': 20}
+            )
+            model = whisper.load_model(model_size, device=device)
+            _whisper_models_cache[cache_key] = model
+            print(f"✅ Модель загружена и закэширована")
+        else:
+            print(f"✅ Используем закэшированную модель Whisper: {model_size} на {device}")
+            model = _whisper_models_cache[cache_key]
         
         # Распознаем речь
         self.update_state(
             state='PROGRESS',
-            meta={'status': 'Распознаем речь...', 'progress': 30}
+            meta={'status': 'Распознаем речь...', 'progress': 40}
         )
         
         print(f"Начинаем распознавание речи из файла: {audio_path}")
         
-        # Параметры для распознавания (язык определяется автоматически)
+        # Оптимизированные параметры для распознавания (скорость vs качество)
         transcribe_options = {
             'verbose': False,
             'task': 'transcribe',
+            'fp16': device == "cuda",  # Используем fp16 на GPU для ускорения
+            'beam_size': 5,  # Уменьшаем beam_size для ускорения (по умолчанию 5, можно уменьшить до 1 для максимальной скорости)
+            'best_of': 5,  # Уменьшаем best_of для ускорения
+            'temperature': 0,  # Используем greedy decoding для скорости
+            'compression_ratio_threshold': 2.4,  # Порог сжатия
+            'logprob_threshold': -1.0,  # Порог вероятности
+            'no_speech_threshold': 0.6,  # Порог отсутствия речи
         }
         
         # Распознаем речь
+        print("Начинаем транскрибацию...")
         result = model.transcribe(audio_path, **transcribe_options)
+        print("Транскрибация завершена")
         
         # Генерируем SRT файл
         self.update_state(
