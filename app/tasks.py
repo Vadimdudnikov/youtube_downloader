@@ -1,10 +1,10 @@
 import os
-import yt_dlp
 import asyncio
 import subprocess
 import sys
 import re
 import copy
+import json
 from celery import current_task
 from app.celery_app import celery_app
 from app.proxy_manager import proxy_manager
@@ -28,14 +28,25 @@ def ensure_directories():
 def get_video_info(youtube_url: str) -> dict:
     """Получаем информацию о видео без загрузки"""
     try:
-        ydl_opts = {
-            'quiet': True,
-            'no_warnings': True,
-            'extract_flat': False,
-        }
+        ytdlp_base = get_ytdlp_path()
+        if isinstance(ytdlp_base, list):
+            cmd = ytdlp_base.copy()
+        else:
+            cmd = [ytdlp_base]
         
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(youtube_url, download=False)
+        cmd.extend([
+            '--dump-json',
+            '--skip-download',
+            '--quiet',
+            '--no-warnings',
+            youtube_url
+        ])
+        
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        
+        if result.returncode == 0:
+            import json
+            info = json.loads(result.stdout)
             return {
                 'title': info.get('title', 'Unknown'),
                 'duration': info.get('duration', 0),
@@ -43,6 +54,8 @@ def get_video_info(youtube_url: str) -> dict:
                 'view_count': info.get('view_count', 0),
                 'upload_date': info.get('upload_date', ''),
             }
+        else:
+            raise Exception(result.stderr or "Не удалось получить информацию о видео")
     except Exception as e:
         print(f"Ошибка получения информации о видео: {e}")
         return {
@@ -127,42 +140,42 @@ def validate_cookies_file(cookie_file: str) -> bool:
         return False
 
 
-def download_with_multiple_clients(ydl_opts: dict, youtube_url: str, use_cookies: bool = False, cookies_path: str = None) -> dict:
+def download_with_multiple_clients(youtube_url: str, output_path: str, audio_only: bool = False,
+                                   use_cookies: bool = False, cookies_path: str = None, 
+                                   proxy_url: str = None) -> dict:
     """
     Пробует загрузить видео, перебирая все доступные клиенты YouTube
     """
     # Список всех доступных клиентов YouTube
     # Если есть cookies, пробуем сначала клиенты, которые их поддерживают
     if use_cookies and cookies_path and os.path.exists(cookies_path):
-        clients_order = ['web', 'ios', 'mweb', 'android', 'tv_embedded', 'tv']
+        clients_order = ['mobile', 'web', 'ios', 'mweb', 'android', 'tv_embedded', 'tv']
     else:
-        # Если нет cookies, пробуем все клиенты
-        clients_order = ['web', 'android', 'ios', 'tv_embedded', 'mweb', 'tv']
+        # Если нет cookies, пробуем все клиенты, начиная с mobile
+        clients_order = ['mobile', 'web', 'android', 'ios', 'tv_embedded', 'mweb', 'tv']
     
     last_error = None
     
     for client in clients_order:
         try:
-            # Глубокое копирование настроек для текущего клиента
-            test_opts = copy.deepcopy(ydl_opts)
-            
-            # Устанавливаем player_client для текущего клиента
-            if 'extractor_args' not in test_opts:
-                test_opts['extractor_args'] = {}
-            if 'youtube' not in test_opts['extractor_args']:
-                test_opts['extractor_args']['youtube'] = {}
-            
-            test_opts['extractor_args']['youtube']['player_client'] = [client]
-            
             print(f"🔄 Пробуем клиент: {client}")
-            result = download_with_retry(test_opts, youtube_url, use_cookies, cookies_path)
+            result = download_with_retry(
+                youtube_url=youtube_url,
+                output_path=output_path,
+                audio_only=audio_only,
+                use_cookies=use_cookies,
+                cookies_path=cookies_path,
+                proxy_url=proxy_url,
+                player_client=client
+            )
             
             if result['success']:
                 print(f"✅ Успешно загружено с клиентом: {client}")
                 return result
             else:
                 last_error = result['error']
-                print(f"❌ Клиент {client} не сработал: {result['error'][:100]}...")
+                error_preview = str(result['error'])[:100] if result['error'] else "Неизвестная ошибка"
+                print(f"❌ Клиент {client} не сработал: {error_preview}...")
                 continue
                 
         except Exception as e:
@@ -178,11 +191,53 @@ def download_with_multiple_clients(ydl_opts: dict, youtube_url: str, use_cookies
     }
 
 
-def download_with_retry(ydl_opts: dict, youtube_url: str, use_cookies: bool = False, cookies_path: str = None) -> dict:
-    """Загружаем видео с возможностью использования куки"""
+def get_ytdlp_path():
+    """Определяет путь к yt-dlp"""
+    # Пробуем найти yt-dlp в стандартных местах
+    possible_paths = [
+        "/usr/local/bin/yt-dlp",
+        "/usr/bin/yt-dlp",
+        "yt-dlp"  # В PATH
+    ]
+    
+    for path in possible_paths:
+        try:
+            result = subprocess.run([path, '--version'], 
+                                  capture_output=True, timeout=5)
+            if result.returncode == 0:
+                return path
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            continue
+    
+    # Если не нашли, используем через python модуль
+    return [sys.executable, '-m', 'yt_dlp']
+
+
+def download_with_retry(youtube_url: str, output_path: str, audio_only: bool = False, 
+                        use_cookies: bool = False, cookies_path: str = None, 
+                        proxy_url: str = None, player_client: str = 'mobile') -> dict:
+    """Загружаем видео через командную строку yt-dlp"""
     try:
+        # Определяем путь к yt-dlp
+        ytdlp_base = get_ytdlp_path()
+        if isinstance(ytdlp_base, list):
+            cmd = ytdlp_base.copy()
+        else:
+            cmd = [ytdlp_base]
+        
+        # Базовые параметры
+        cmd.extend([
+            '--extractor-args', f'youtube:player_client={player_client},no_sabr=1',
+            '--no-warnings',
+            '--quiet',
+        ])
+        
+        # Добавляем прокси если есть
+        if proxy_url:
+            cmd.extend(['--proxy', proxy_url])
+        
+        # Добавляем cookies если есть
         if use_cookies:
-            # Используем переданный путь или путь из настроек
             cookie_file = cookies_path or settings.cookies_file
             if not os.path.isabs(cookie_file):
                 cookie_file = os.path.join(os.getcwd(), cookie_file)
@@ -190,35 +245,61 @@ def download_with_retry(ydl_opts: dict, youtube_url: str, use_cookies: bool = Fa
             if os.path.exists(cookie_file):
                 # Проверяем формат файла
                 is_valid = validate_cookies_file(cookie_file)
-                ydl_opts['cookiefile'] = cookie_file
+                cmd.extend(['--cookies', cookie_file])
                 
                 if is_valid:
                     print(f"✅ Используем cookies из файла: {cookie_file}")
                 else:
                     print(f"⚠️  ВНИМАНИЕ: Файл cookies имеет неправильный формат!")
-                    print(f"   Файл будет использован, но некоторые записи могут быть пропущены.")
-                    print(f"   Для правильного формата используйте расширение браузера:")
-                    print(f"   - Chrome/Edge: 'Get cookies.txt LOCALLY' или 'cookies.txt'")
-                    print(f"   - Firefox: 'cookies.txt'")
-                    print(f"   Формат Netscape: domain\\tflag\\tpath\\tsecure\\texpiration\\tname\\tvalue")
-                    print(f"   Пример: .youtube.com\\tTRUE\\t/\\tFALSE\\t1734567890\\tVISITOR_INFO1_LIVE\\tvalue")
             else:
                 print(f"⚠️  Файл cookies не найден: {cookie_file}")
         
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            # Получаем информацию о видео
-            info = ydl.extract_info(youtube_url, download=False)
-            video_title = info.get('title', 'Unknown')
-            video_duration = info.get('duration', 0)
-            
-            # Загружаем видео или аудио
-            ydl.download([youtube_url])
+        # Формат и выходной файл
+        if audio_only:
+            cmd.extend(['-f', 'bestaudio'])
+            # Для аудио нужно будет конвертировать в MP3 через FFmpeg
+            cmd.extend(['-x', '--audio-format', 'mp3', '--audio-quality', '192K'])
+        else:
+            cmd.extend(['-f', 'best[height<=720]'])
+        
+        cmd.extend(['-o', output_path])
+        cmd.append(youtube_url)
+        
+        print(f"Выполняем команду: {' '.join(cmd[:10])}...")  # Показываем только начало команды
+        
+        # Запускаем команду
+        process = subprocess.run(cmd, text=True, capture_output=True, timeout=600)
+        
+        if process.returncode == 0:
+            # Получаем информацию о видео для возврата
+            try:
+                video_info = get_video_info(youtube_url)
+                video_title = video_info.get('title', 'Unknown')
+                video_duration = video_info.get('duration', 0)
+            except Exception as e:
+                print(f"Не удалось получить метаданные: {e}")
+                video_title = 'Unknown'
+                video_duration = 0
             
             return {
                 'success': True,
                 'title': video_title,
                 'duration': video_duration
             }
+        else:
+            error_msg = process.stderr or process.stdout or "Неизвестная ошибка"
+            return {
+                'success': False,
+                'error': error_msg,
+                'error_type': 'YtDlpError'
+            }
+            
+    except subprocess.TimeoutExpired:
+        return {
+            'success': False,
+            'error': 'Таймаут при загрузке',
+            'error_type': 'TimeoutError'
+        }
     except Exception as e:
         return {
             'success': False,
@@ -430,71 +511,11 @@ def download_video_task(self, youtube_url: str, audio_only: bool = False):
                 'cached': True
             }
         
-        # Настройки для yt-dlp
+        # Определяем путь для выходного файла
         if audio_only:
-            # Настройки для загрузки только аудио в MP3
-            ydl_opts = {
-                'outtmpl': f'{video_dir}/{youtube_id}.%(ext)s',  # Используем YouTube ID
-                'format': 'bestaudio/best',  # Лучшее аудио качество
-                'postprocessors': [{
-                    'key': 'FFmpegExtractAudio',
-                    'preferredcodec': 'mp3',
-                    'preferredquality': '192',
-                }],
-                'progress_hooks': [update_progress],
-                'extractor_retries': 3,
-                'fragment_retries': 3,
-                'retries': 3,
-                'socket_timeout': 30,
-                'http_chunk_size': 10485760,  # 10MB chunks
-                'writethumbnail': False,
-                'writeinfojson': False,
-                'writesubtitles': False,
-                'writeautomaticsub': False,
-                'ignoreerrors': False,
-                'no_warnings': False,
-                'extract_flat': False,
-                'age_limit': None,
-                'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-                'force_insecure': True,  # Принудительно разрешить insecure workaround для обхода ограничений
-                # Дополнительные настройки для обхода ограничений YouTube
-                # player_client будет установлен динамически в download_with_multiple_clients
-                'extractor_args': {
-                    'youtube': {
-                        'skip': ['dash', 'hls'],
-                        'no_sabr': True  # Отключаем SABR streaming для обхода блокировок
-                    }
-                }
-            }
+            output_path = f'{video_dir}/{youtube_id}.%(ext)s'  # Будет конвертирован в MP3
         else:
-            # Настройки для загрузки видео
-            ydl_opts = {
-                'outtmpl': f'{video_dir}/{youtube_id}.%(ext)s',  # Используем YouTube ID
-                'format': 'best[height<=720]',  # Максимум 720p
-                'progress_hooks': [update_progress],
-                'extractor_retries': 3,
-                'fragment_retries': 3,
-                'retries': 3,
-                'socket_timeout': 30,
-                'http_chunk_size': 10485760,  # 10MB chunks
-                'writethumbnail': False,
-                'writeinfojson': False,
-                'writesubtitles': False,
-                'writeautomaticsub': False,
-                'ignoreerrors': False,
-                'no_warnings': False,
-                'extract_flat': False,
-                'age_limit': None,
-                'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-                # Дополнительные настройки для обхода ограничений YouTube
-                # player_client будет установлен динамически в download_with_multiple_clients
-                'extractor_args': {
-                    'youtube': {
-                        'skip': ['dash', 'hls'],
-                        'no_sabr': True  # Отключаем SABR streaming для обхода блокировок
-                    }
-                }
-            }
+            output_path = f'{video_dir}/{youtube_id}.%(ext)s'
         
         # Проверяем наличие cookies файла
         cookies_path = settings.cookies_file
@@ -517,10 +538,11 @@ def download_video_task(self, youtube_url: str, audio_only: bool = False):
                 cookies_path = alt_cookies_path
                 cookies_exist = True
         
-        # Добавляем прокси если доступен
+        # Формируем URL прокси если доступен
+        proxy_url_str = None
         if proxy_url:
-            ydl_opts['proxy'] = proxy_url
             print(f"Используем прокси: {proxy_url}")
+            proxy_url_str = proxy_url
         
         download_type = "аудио" if audio_only else "видео"
         
@@ -533,7 +555,14 @@ def download_video_task(self, youtube_url: str, audio_only: bool = False):
                     'progress': 5
                 }
             )
-            result = download_with_multiple_clients(ydl_opts, youtube_url, use_cookies=True, cookies_path=cookies_path)
+            result = download_with_multiple_clients(
+                youtube_url=youtube_url,
+                output_path=output_path,
+                audio_only=audio_only,
+                use_cookies=True,
+                cookies_path=cookies_path,
+                proxy_url=proxy_url_str
+            )
         else:
             # Первая попытка загрузки без куки
             self.update_state(
@@ -543,7 +572,14 @@ def download_video_task(self, youtube_url: str, audio_only: bool = False):
                     'progress': 5
                 }
             )
-            result = download_with_multiple_clients(ydl_opts, youtube_url, use_cookies=False)
+            result = download_with_multiple_clients(
+                youtube_url=youtube_url,
+                output_path=output_path,
+                audio_only=audio_only,
+                use_cookies=False,
+                cookies_path=None,
+                proxy_url=proxy_url_str
+            )
         
         # Если первая попытка не удалась и ошибка связана с аутентификацией, пробуем с куки (если еще не пробовали)
         if not result['success'] and is_authentication_error(result['error']) and not cookies_exist:
@@ -564,7 +600,14 @@ def download_video_task(self, youtube_url: str, audio_only: bool = False):
                 }
             )
             
-            result = download_with_multiple_clients(ydl_opts, youtube_url, use_cookies=True, cookies_path=retry_cookies_path)
+            result = download_with_multiple_clients(
+                youtube_url=youtube_url,
+                output_path=output_path,
+                audio_only=audio_only,
+                use_cookies=True,
+                cookies_path=retry_cookies_path,
+                proxy_url=proxy_url_str
+            )
         
         # Если обе попытки не удались, поднимаем исключение
         if not result['success']:
