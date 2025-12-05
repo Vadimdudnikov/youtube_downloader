@@ -8,6 +8,19 @@ from celery import current_task
 from app.celery_app import celery_app
 from app.proxy_manager import proxy_manager
 from app.config import settings
+import whisper
+
+
+def ensure_directories():
+    """Создает необходимые директории если их нет"""
+    assets_dir = "assets"
+    video_dir = os.path.join(assets_dir, "video")
+    srt_dir = os.path.join(assets_dir, "srt")
+    
+    os.makedirs(video_dir, exist_ok=True)
+    os.makedirs(srt_dir, exist_ok=True)
+    
+    return video_dir, srt_dir
 
 
 def get_video_info(youtube_url: str) -> dict:
@@ -221,6 +234,9 @@ def download_video_task(self, youtube_url: str, audio_only: bool = False):
             current_proxy = None
             print(f"[PROXY] Прокси не используется для этой загрузки")
         
+        # Убеждаемся, что папки существуют
+        video_dir, srt_dir = ensure_directories()
+        
         # Извлекаем YouTube ID для имени файла
         youtube_id = extract_youtube_id(youtube_url)
         print(f"YouTube ID: {youtube_id}")
@@ -230,18 +246,18 @@ def download_video_task(self, youtube_url: str, audio_only: bool = False):
         if audio_only:
             # Ищем MP3 файл
             mp3_file = f"{youtube_id}.mp3"
-            mp3_path = os.path.join('assets', mp3_file)
+            mp3_path = os.path.join(video_dir, mp3_file)
             if os.path.exists(mp3_path):
                 existing_file = mp3_file
         else:
             # Ищем видео файл (любое расширение)
-            for file in os.listdir('assets'):
+            for file in os.listdir(video_dir):
                 if file.startswith(youtube_id) and not file.endswith('.mp3'):
                     existing_file = file
                     break
         
         if existing_file:
-            file_path = os.path.join('assets', existing_file)
+            file_path = os.path.join(video_dir, existing_file)
             file_size = os.path.getsize(file_path)
             download_type = "аудио" if audio_only else "видео"
             
@@ -271,7 +287,7 @@ def download_video_task(self, youtube_url: str, audio_only: bool = False):
         if audio_only:
             # Настройки для загрузки только аудио в MP3
             ydl_opts = {
-                'outtmpl': f'assets/{youtube_id}.%(ext)s',  # Используем YouTube ID
+                'outtmpl': f'{video_dir}/{youtube_id}.%(ext)s',  # Используем YouTube ID
                 'format': 'bestaudio/best',  # Лучшее аудио качество
                 'postprocessors': [{
                     'key': 'FFmpegExtractAudio',
@@ -304,7 +320,7 @@ def download_video_task(self, youtube_url: str, audio_only: bool = False):
         else:
             # Настройки для загрузки видео
             ydl_opts = {
-                'outtmpl': f'assets/{youtube_id}.%(ext)s',  # Используем YouTube ID
+                'outtmpl': f'{video_dir}/{youtube_id}.%(ext)s',  # Используем YouTube ID
                 'format': 'best[height<=720]',  # Максимум 720p
                 'progress_hooks': [update_progress],
                 'extractor_retries': 3,
@@ -384,7 +400,7 @@ def download_video_task(self, youtube_url: str, audio_only: bool = False):
         # Ищем загруженный файл по YouTube ID
         downloaded_file = None
         
-        for file in os.listdir('assets'):
+        for file in os.listdir(video_dir):
             # Для аудио ищем .mp3 файлы с YouTube ID, для видео - любые файлы с YouTube ID
             if audio_only:
                 if file.startswith(youtube_id) and file.endswith('.mp3'):
@@ -396,7 +412,7 @@ def download_video_task(self, youtube_url: str, audio_only: bool = False):
                     break
         
         if downloaded_file:
-            file_path = os.path.join('assets', downloaded_file)
+            file_path = os.path.join(video_dir, downloaded_file)
             file_size = os.path.getsize(file_path)
             
             return {
@@ -414,8 +430,8 @@ def download_video_task(self, youtube_url: str, audio_only: bool = False):
             }
         else:
             # Если файл не найден, выводим список файлов для отладки
-            files_in_assets = os.listdir('assets')
-            print(f"Файлы в папке assets: {files_in_assets}")
+            files_in_video = os.listdir(video_dir)
+            print(f"Файлы в папке video: {files_in_video}")
             print(f"Ищем файл с префиксом: {youtube_id}")
             raise Exception(f"Файл не найден после загрузки. YouTube ID: {youtube_id}")
                 
@@ -461,3 +477,196 @@ def update_ytdlp_task():
         return "yt-dlp обновлён успешно"
     except Exception as e:
         return f"Ошибка обновления yt-dlp: {str(e)}"
+
+
+def format_timestamp(seconds: float) -> str:
+    """Форматирует время в формат SRT (HH:MM:SS,mmm)"""
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    secs = int(seconds % 60)
+    millis = int((seconds % 1) * 1000)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
+
+
+def generate_srt_from_segments(segments: list, output_path: str) -> str:
+    """Генерирует SRT файл из сегментов распознавания речи"""
+    srt_content = []
+    
+    for i, segment in enumerate(segments, start=1):
+        start_time = format_timestamp(segment['start'])
+        end_time = format_timestamp(segment['end'])
+        text = segment['text'].strip()
+        
+        srt_content.append(f"{i}\n{start_time} --> {end_time}\n{text}\n")
+    
+    srt_text = "\n".join(srt_content)
+    
+    # Сохраняем в файл
+    with open(output_path, 'w', encoding='utf-8') as f:
+        f.write(srt_text)
+    
+    return srt_text
+
+
+@celery_app.task(bind=True)
+def create_srt_task(self, youtube_url: str, model_size: str = "base", language: str = None):
+    """
+    Задача для создания SRT файла из аудио видео с YouTube
+    
+    Args:
+        youtube_url: URL видео на YouTube
+        model_size: Размер модели Whisper (tiny, base, small, medium, large)
+        language: Язык для распознавания (None = автоопределение)
+    """
+    try:
+        # Убеждаемся, что папки существуют
+        video_dir, srt_dir = ensure_directories()
+        
+        # Извлекаем YouTube ID
+        youtube_id = extract_youtube_id(youtube_url)
+        print(f"Создание SRT для YouTube ID: {youtube_id}")
+        
+        # Проверяем, существует ли уже SRT файл - если да, сразу возвращаем его
+        srt_file = f"{youtube_id}.srt"
+        srt_path = os.path.join(srt_dir, srt_file)
+        
+        if os.path.exists(srt_path):
+            self.update_state(
+                state='PROGRESS',
+                meta={'status': 'SRT файл уже существует', 'progress': 100}
+            )
+            
+            file_size = os.path.getsize(srt_path)
+            video_info = get_video_info(youtube_url)
+            
+            return {
+                'status': 'completed',
+                'progress': 100,
+                'message': 'SRT файл уже существует',
+                'file_path': srt_path,
+                'file_name': srt_file,
+                'file_size': file_size,
+                'youtube_id': youtube_id,
+                'title': video_info['title'],
+                'duration': video_info['duration'],
+                'cached': True
+            }
+        
+        # Обновляем статус
+        self.update_state(
+            state='PROGRESS',
+            meta={'status': 'Проверяем наличие аудио...', 'progress': 0}
+        )
+        
+        # Проверяем наличие аудио файла
+        audio_file = f"{youtube_id}.mp3"
+        audio_path = os.path.join(video_dir, audio_file)
+        audio_exists = os.path.exists(audio_path)
+        
+        # Если аудио нет, скачиваем его
+        if not audio_exists:
+            self.update_state(
+                state='PROGRESS',
+                meta={'status': 'Аудио не найдено. Загружаем аудио...', 'progress': 10}
+            )
+            
+            print(f"Аудио файл не найден. Загружаем аудио для {youtube_url}")
+            
+            # Запускаем задачу загрузки аудио синхронно
+            download_result = download_video_task.apply(args=[youtube_url, True])
+            
+            if download_result.successful():
+                result = download_result.result
+                if isinstance(result, dict) and result.get('status') == 'failed':
+                    raise Exception(f"Ошибка загрузки аудио: {result.get('error', 'Неизвестная ошибка')}")
+            else:
+                raise Exception(f"Ошибка загрузки аудио: {str(download_result.info)}")
+            
+            # Проверяем, что файл появился
+            if not os.path.exists(audio_path):
+                raise Exception("Аудио файл не был создан после загрузки")
+            
+            print(f"Аудио успешно загружено: {audio_file}")
+        else:
+            print(f"Используем существующий аудио файл: {audio_file}")
+        
+        # Загружаем модель Whisper
+        self.update_state(
+            state='PROGRESS',
+            meta={'status': f'Загружаем модель Whisper ({model_size})...', 'progress': 20}
+        )
+        
+        print(f"Загружаем модель Whisper: {model_size}")
+        model = whisper.load_model(model_size)
+        
+        # Распознаем речь
+        self.update_state(
+            state='PROGRESS',
+            meta={'status': 'Распознаем речь...', 'progress': 30}
+        )
+        
+        print(f"Начинаем распознавание речи из файла: {audio_path}")
+        
+        # Параметры для распознавания
+        transcribe_options = {
+            'verbose': False,
+            'task': 'transcribe',
+        }
+        
+        if language:
+            transcribe_options['language'] = language
+        
+        # Распознаем речь
+        result = model.transcribe(audio_path, **transcribe_options)
+        
+        # Генерируем SRT файл
+        self.update_state(
+            state='PROGRESS',
+            meta={'status': 'Генерируем SRT файл...', 'progress': 90}
+        )
+        
+        print(f"Генерируем SRT файл: {srt_path}")
+        generate_srt_from_segments(result['segments'], srt_path)
+        
+        file_size = os.path.getsize(srt_path)
+        
+        # Получаем информацию о видео
+        video_info = get_video_info(youtube_url)
+        
+        self.update_state(
+            state='PROGRESS',
+            meta={'status': 'SRT файл создан успешно', 'progress': 100}
+        )
+        
+        return {
+            'status': 'completed',
+            'progress': 100,
+            'message': 'SRT файл успешно создан',
+            'file_path': srt_path,
+            'file_name': srt_file,
+            'file_size': file_size,
+            'youtube_id': youtube_id,
+            'title': video_info['title'],
+            'duration': video_info['duration'],
+            'cached': False,
+            'audio_cached': audio_exists
+        }
+        
+    except Exception as e:
+        error_message = str(e)
+        print(f"Ошибка создания SRT: {error_message}")
+        
+        self.update_state(
+            state='FAILURE',
+            meta={
+                'status': 'Ошибка создания SRT',
+                'error': error_message,
+                'exc_type': type(e).__name__
+            }
+        )
+        
+        return {
+            'status': 'failed',
+            'error': error_message,
+            'exc_type': type(e).__name__
+        }

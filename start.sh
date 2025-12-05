@@ -43,10 +43,18 @@ if [ ! -f ".env" ]; then
     echo "   PROXY_API_KEY=ваш_api_ключ_здесь"
 fi
 
-# Создаем папку assets если её нет
+# Создаем папки assets и подпапки если их нет
 if [ ! -d "assets" ]; then
     echo "📁 Создаем папку assets..."
     mkdir assets
+fi
+if [ ! -d "assets/video" ]; then
+    echo "📁 Создаем папку assets/video..."
+    mkdir -p assets/video
+fi
+if [ ! -d "assets/srt" ]; then
+    echo "📁 Создаем папку assets/srt..."
+    mkdir -p assets/srt
 fi
 
 # Проверяем запущен ли Redis
@@ -71,6 +79,7 @@ cleanup() {
     echo ""
     echo "🛑 Останавливаем все процессы..."
     kill $CELERY_PID 2>/dev/null
+    kill $CELERY_SRT_PID 2>/dev/null
     kill $FASTAPI_PID 2>/dev/null
     echo "✅ Все процессы остановлены"
     exit 0
@@ -79,12 +88,17 @@ cleanup() {
 # Устанавливаем обработчик сигналов
 trap cleanup SIGINT SIGTERM
 
-# Запускаем Celery worker в фоне
-echo "🔄 Запускаем Celery worker..."
-celery -A app.celery_app worker --loglevel=info --queues=youtube_download --concurrency=2 &
+# Запускаем Celery worker для загрузки видео/аудио в фоне
+echo "🔄 Запускаем Celery worker для загрузки..."
+celery -A app.celery_app worker --loglevel=info --queues=youtube_download --concurrency=2 --hostname=worker@%h &
 CELERY_PID=$!
 
-# Ждем немного чтобы Celery запустился
+# Запускаем отдельный Celery worker для создания SRT (только 1 задача одновременно)
+echo "🔄 Запускаем Celery worker для создания SRT..."
+celery -A app.celery_app worker --loglevel=info --queues=srt_creation --concurrency=2 --hostname=srt_worker@%h &
+CELERY_SRT_PID=$!
+
+# Ждем немного чтобы Celery workers запустились
 sleep 3
 
 # Запускаем FastAPI приложение в фоне
@@ -100,21 +114,23 @@ echo "🎉 YouTube Download API запущен!"
 echo ""
 echo "📊 Статус сервисов:"
 echo "   • Redis: ✅ Запущен"
-echo "   • Celery Worker: ✅ Запущен (PID: $CELERY_PID)"
+echo "   • Celery Worker (загрузка): ✅ Запущен (PID: $CELERY_PID)"
+echo "   • Celery Worker (SRT): ✅ Запущен (PID: $CELERY_SRT_PID, concurrency=1)"
 echo "   • FastAPI: ✅ Запущен (PID: $FASTAPI_PID)"
 echo ""
 echo "🌐 Доступные URL:"
-echo "   • API: http://localhost:8000"
-echo "   • Документация: http://localhost:8000/docs"
-echo "   • Альтернативная документация: http://localhost:8000/redoc"
+echo "   • API: http://localhost:3000"
+echo "   • Документация: http://localhost:3000/docs"
+echo "   • Альтернативная документация: http://localhost:3000/redoc"
 echo ""
 echo "📋 Полезные команды:"
-echo "   • Проверить статус прокси: curl http://localhost:8000/api/v1/proxies/status"
-echo "   • Обновить прокси: curl -X POST http://localhost:8000/api/v1/proxies/update"
-echo "   • Список файлов: curl http://localhost:8000/api/v1/list"
+echo "   • Проверить статус прокси: curl http://localhost:3000/api/v1/proxies/status"
+echo "   • Обновить прокси: curl -X POST http://localhost:3000/api/v1/proxies/update"
+echo "   • Список файлов: curl http://localhost:3000/api/v1/list"
+echo "   • Создать SRT: curl -X POST http://localhost:3000/api/v1/srt -H 'Content-Type: application/json' -d '{\"youtube_url\": \"https://youtube.com/watch?v=...\"}'"
 echo ""
 echo "⏹️  Для остановки нажмите Ctrl+C"
 echo ""
 
 # Ждем завершения процессов
-wait $CELERY_PID $FASTAPI_PID
+wait $CELERY_PID $CELERY_SRT_PID $FASTAPI_PID

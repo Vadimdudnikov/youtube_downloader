@@ -25,10 +25,24 @@ celery_app.conf.update(
             'exchange': 'youtube_download',
             'routing_key': 'youtube_download',
         },
+        'srt_creation': {
+            'exchange': 'srt_creation',
+            'routing_key': 'srt_creation',
+        },
+    },
+    task_routes={
+        'app.tasks.create_srt_task': {'queue': 'srt_creation'},
     },
 )
 
-# Создание папки assets если её нет
+# Создание папок assets и подпапок если их нет
 assets_dir = "assets"
+video_dir = os.path.join(assets_dir, "video")
+srt_dir = os.path.join(assets_dir, "srt")
+
 if not os.path.exists(assets_dir):
     os.makedirs(assets_dir)
+if not os.path.exists(video_dir):
+    os.makedirs(video_dir)
+if not os.path.exists(srt_dir):
+    os.makedirs(srt_dir)
