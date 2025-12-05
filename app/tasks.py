@@ -12,6 +12,14 @@ from app.config import settings
 import whisperx
 import torch
 
+# Настройка для совместимости с PyTorch 2.6+
+# Разрешаем загрузку omegaconf.ListConfig для WhisperX
+try:
+    from omegaconf import ListConfig
+    torch.serialization.add_safe_globals([ListConfig])
+except ImportError:
+    pass
+
 # Глобальный кэш для моделей Whisper (чтобы не загружать каждый раз)
 _whisper_models_cache = {}
 
@@ -847,12 +855,33 @@ def create_srt_task(self, youtube_url: str, model_size: str = "medium"):
                 meta={'status': f'Загружаем модель WhisperX ({model_size})...', 'progress': 20}
             )
             # Загружаем модель WhisperX с оптимизацией
-            model = whisperx.load_model(
-                model_size, 
-                device=device, 
-                compute_type=compute_type,
-                language=None  # Автоопределение языка
-            )
+            # Исправляем проблему с PyTorch 2.6+ и weights_only
+            try:
+                from omegaconf import ListConfig
+                with torch.serialization.safe_globals([ListConfig]):
+                    model = whisperx.load_model(
+                        model_size, 
+                        device=device, 
+                        compute_type=compute_type,
+                        language=None  # Автоопределение языка
+                    )
+            except (ImportError, AttributeError):
+                # Если safe_globals недоступен, используем патч torch.load
+                original_load = torch.load
+                def patched_load(*args, **kwargs):
+                    kwargs['weights_only'] = False
+                    return original_load(*args, **kwargs)
+                torch.load = patched_load
+                try:
+                    model = whisperx.load_model(
+                        model_size, 
+                        device=device, 
+                        compute_type=compute_type,
+                        language=None
+                    )
+                finally:
+                    torch.load = original_load
+            
             _whisper_models_cache[cache_key] = model
             print(f"✅ Модель WhisperX загружена и закэширована")
         else:
