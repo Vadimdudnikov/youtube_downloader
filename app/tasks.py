@@ -12,6 +12,33 @@ from app.config import settings
 import whisperx
 import torch
 
+import warnings
+
+# Глобальное отключение стандартных предупреждений
+warnings.filterwarnings("ignore", category=UserWarning)
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+
+# Торч + Торчаудио
+warnings.filterwarnings("ignore", message=".*torchaudio._backend.list_audio_backends.*")
+warnings.filterwarnings("ignore", message=".*TensorFloat-32.*")
+
+# WhisperX / pyannote / alignment
+warnings.filterwarnings("ignore", module="pyannote")
+warnings.filterwarnings("ignore", message=".*pyannote.audio.*")
+warnings.filterwarnings("ignore", message=".*alignment.*")
+
+# Lightning spam
+warnings.filterwarnings("ignore", message=".*Lightning automatically upgraded.*")
+warnings.filterwarnings("ignore", module="pytorch_lightning")
+
+# SpeechBrain
+warnings.filterwarnings("ignore", module="speechbrain")
+
+# HF transformers
+warnings.filterwarnings("ignore", module="transformers")
+
+
 # Настройка для совместимости с PyTorch 2.6+
 # Патчим torch.load глобально для работы с WhisperX и его зависимостями
 # (pyannote, speechbrain и т.д.)
@@ -877,6 +904,10 @@ def create_srt_task(self, youtube_url: str, model_size: str = "medium"):
                 language=None,  # Автоопределение языка
                 vad_model="silero"  # Используем silero VAD вместо pyannote.audio
             )
+
+            # Отключаем aligner полностью
+            model.align_model = None
+            model.aligner = None
             
             _whisper_models_cache[cache_key] = model
             print(f"✅ Модель WhisperX загружена и закэширована")
