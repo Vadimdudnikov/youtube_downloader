@@ -738,7 +738,7 @@ def generate_srt_from_segments(segments: list, output_path: str) -> str:
 
 
 @celery_app.task(bind=True)
-def create_srt_task(self, youtube_url: str, model_size: str = "base"):
+def create_srt_task(self, youtube_url: str, model_size: str = "medium"):
     """
     Задача для создания SRT файла из аудио видео с YouTube
     
