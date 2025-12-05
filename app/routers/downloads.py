@@ -25,7 +25,6 @@ class DownloadResponse(BaseModel):
 class SRTRequest(BaseModel):
     youtube_url: HttpUrl
     model_size: Optional[str] = "base"  # tiny, base, small, medium, large
-    language: Optional[str] = None  # Код языка (ru, en, etc.) или None для автоопределения
 
 
 class SRTResponse(BaseModel):
@@ -238,8 +237,7 @@ async def create_srt(request: SRTRequest):
         # Отправляем задачу в Celery
         task = create_srt_task.delay(
             str(request.youtube_url),
-            model_size=request.model_size,
-            language=request.language
+            model_size=request.model_size
         )
         
         return SRTResponse(

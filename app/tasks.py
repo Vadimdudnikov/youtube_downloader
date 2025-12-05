@@ -738,14 +738,13 @@ def generate_srt_from_segments(segments: list, output_path: str) -> str:
 
 
 @celery_app.task(bind=True)
-def create_srt_task(self, youtube_url: str, model_size: str = "base", language: str = None):
+def create_srt_task(self, youtube_url: str, model_size: str = "base"):
     """
     Задача для создания SRT файла из аудио видео с YouTube
     
     Args:
         youtube_url: URL видео на YouTube
         model_size: Размер модели Whisper (tiny, base, small, medium, large)
-        language: Язык для распознавания (None = автоопределение)
     """
     try:
         # Убеждаемся, что папки существуют
@@ -844,14 +843,11 @@ def create_srt_task(self, youtube_url: str, model_size: str = "base", language: 
         
         print(f"Начинаем распознавание речи из файла: {audio_path}")
         
-        # Параметры для распознавания
+        # Параметры для распознавания (язык определяется автоматически)
         transcribe_options = {
             'verbose': False,
             'task': 'transcribe',
         }
-        
-        if language:
-            transcribe_options['language'] = language
         
         # Распознаем речь
         result = model.transcribe(audio_path, **transcribe_options)
