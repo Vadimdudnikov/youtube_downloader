@@ -424,7 +424,8 @@ def create_srt_task(self, youtube_url: str, model_size: str = "medium"):
             audio_path,
             batch_size=16,  # Размер батча для обработки
             language=None,  # Автоопределение языка
-            task="transcribe"
+            task="transcribe",
+            segment_resolution="sentence"  # Разбиваем по предложениям, а не по чанкам
         )
         
         print(f"Транскрибация завершена. Язык: {result.get('language', 'unknown')}")
