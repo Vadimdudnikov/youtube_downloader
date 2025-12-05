@@ -88,6 +88,10 @@ cleanup() {
 # Устанавливаем обработчик сигналов
 trap cleanup SIGINT SIGTERM
 
+# Отключаем системный cudnn внутри контейнера (для WhisperX)
+export LD_LIBRARY_PATH=""
+echo "🔧 Отключен системный cudnn (LD_LIBRARY_PATH очищен)"
+
 # Запускаем Celery worker для загрузки видео/аудио в фоне
 echo "🔄 Запускаем Celery worker для загрузки..."
 celery -A app.celery_app worker --loglevel=info --queues=youtube_download --concurrency=2 --hostname=worker@%h &
