@@ -9,6 +9,7 @@ from app.celery_app import celery_app
 from app.proxy_manager import proxy_manager
 from app.config import settings
 import whisper
+import torch
 
 
 def ensure_directories():
@@ -596,8 +597,16 @@ def create_srt_task(self, youtube_url: str, model_size: str = "base", language: 
             meta={'status': f'Загружаем модель Whisper ({model_size})...', 'progress': 20}
         )
         
-        print(f"Загружаем модель Whisper: {model_size}")
-        model = whisper.load_model(model_size)
+        # Определяем устройство (GPU или CPU)
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        if device == "cuda":
+            print(f"Используем GPU: {torch.cuda.get_device_name(0)}")
+            print(f"CUDA версия: {torch.version.cuda}")
+        else:
+            print("GPU не доступен, используем CPU")
+        
+        print(f"Загружаем модель Whisper: {model_size} на устройстве: {device}")
+        model = whisper.load_model(model_size, device=device)
         
         # Распознаем речь
         self.update_state(

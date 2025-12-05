@@ -13,3 +13,7 @@ aiohttp==3.9.1
 openai-whisper>=20231117
 torch>=2.0.0
 torchaudio>=2.0.0
+# Для использования GPU установите PyTorch с поддержкой CUDA:
+# pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu118
+# или для CUDA 11.8: pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu118
+# или для CUDA 12.1: pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu121
