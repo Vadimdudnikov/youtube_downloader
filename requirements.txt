@@ -16,3 +16,11 @@ requests==2.31.0
 
 # faster-whisper для транскрибации (быстрее и стабильнее чем WhisperX)
 faster-whisper>=1.0.0
+
+# PyTorch для faster-whisper
+torch>=2.0.0
+torchaudio>=2.0.0
+# Для использования GPU установите PyTorch с поддержкой CUDA:
+# pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu118
+# или для CUDA 11.8: pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu118
+# или для CUDA 12.1: pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu121
