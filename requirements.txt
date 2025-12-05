@@ -23,4 +23,4 @@ omegaconf==2.3.0
 # 🔥 PyTorch + CUDA 12.4 (совместимо с WhisperX 3.4.3)
 torch==2.6.0+cu124
 torchaudio==2.6.0+cu124
-torchvision==0
+torchvision==0.21.0+cu124
