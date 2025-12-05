@@ -3,7 +3,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, HttpUrl
 import os
 
-from app.tasks import download_video_task, transcribe_audio_task, extract_youtube_id
+from app.tasks import download_video_task, transcribe_audio_task, extract_youtube_id, create_srt_from_youtube_task
 from typing import Optional
 
 router = APIRouter()
@@ -196,47 +196,9 @@ async def create_srt(request: SRTRequest):
                 detail=f"Неверный размер модели. Доступные: {', '.join(valid_models)}"
             )
         
-        # Извлекаем YouTube ID
-        youtube_id = extract_youtube_id(str(request.youtube_url))
-        
-        # Проверяем наличие аудио файла
-        video_dir = os.path.join("assets", "video")
-        audio_file = f"{youtube_id}.mp3"
-        audio_path = os.path.join(video_dir, audio_file)
-        
-        # Если аудио нет, сначала скачиваем его
-        if not os.path.exists(audio_path):
-            # Запускаем задачу загрузки аудио
-            download_task = download_video_task.delay(str(request.youtube_url), True)
-            
-            # Ждем завершения загрузки (можно сделать асинхронно, но для простоты ждем)
-            # В реальном приложении лучше использовать цепочку задач Celery
-            import time
-            timeout = 300  # 5 минут
-            elapsed = 0
-            while elapsed < timeout:
-                if download_task.ready():
-                    result = download_task.result
-                    if isinstance(result, dict) and result.get('status') == 'failed':
-                        raise HTTPException(
-                            status_code=400,
-                            detail=f"Ошибка загрузки аудио: {result.get('error', 'Неизвестная ошибка')}"
-                        )
-                    break
-                time.sleep(2)
-                elapsed += 2
-            
-            if not download_task.ready():
-                raise HTTPException(status_code=408, detail="Таймаут загрузки аудио")
-            
-            # Проверяем, что файл появился
-            if not os.path.exists(audio_path):
-                raise HTTPException(status_code=500, detail="Аудио файл не был создан после загрузки")
-        
-        # Запускаем задачу транскрипции
-        task = transcribe_audio_task.delay(
-            audio_path=audio_path,
-            task_id=youtube_id,
+        # Запускаем задачу в фоне (она сама загрузит аудио и выполнит транскрипцию)
+        task = create_srt_from_youtube_task.delay(
+            str(request.youtube_url),
             model_size=request.model_size
         )
         
@@ -256,7 +218,7 @@ async def create_srt(request: SRTRequest):
 async def get_srt_status(task_id: str):
     """Получить статус создания JSON файла по task_id"""
     try:
-        task = transcribe_audio_task.AsyncResult(task_id)
+        task = create_srt_from_youtube_task.AsyncResult(task_id)
         
         if task.state == 'PENDING':
             response = {

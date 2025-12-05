@@ -280,3 +280,137 @@ def transcribe_audio_task(self, audio_path: str, task_id: str = None, model_size
             'error': error_message,
             'exc_type': type(e).__name__
         }
+
+
+@celery_app.task(bind=True)
+def create_srt_from_youtube_task(self, youtube_url: str, model_size: str = "medium"):
+    """
+    Задача для создания JSON файла с субтитрами из YouTube URL
+    Выполняет загрузку аудио (если нужно) и транскрипцию последовательно
+    
+    Args:
+        youtube_url: URL видео на YouTube
+        model_size: Размер модели WhisperX (tiny, base, small, medium, large)
+    """
+    try:
+        # Убеждаемся, что папки существуют
+        video_dir, srt_dir = ensure_directories()
+        
+        # Извлекаем YouTube ID
+        youtube_id = extract_youtube_id(youtube_url)
+        print(f"Создание JSON субтитров для YouTube ID: {youtube_id}")
+        
+        # Проверяем, существует ли уже JSON файл
+        json_file = f"{youtube_id}.json"
+        json_path = os.path.join(srt_dir, json_file)
+        
+        if os.path.exists(json_path):
+            self.update_state(
+                state='PROGRESS',
+                meta={'status': 'JSON файл уже существует', 'progress': 100}
+            )
+            
+            file_size = os.path.getsize(json_path)
+            
+            return {
+                'status': 'completed',
+                'progress': 100,
+                'message': 'JSON файл уже существует',
+                'file_path': json_path,
+                'file_name': json_file,
+                'file_size': file_size,
+                'youtube_id': youtube_id,
+                'cached': True
+            }
+        
+        # Проверяем наличие аудио файла
+        audio_file = f"{youtube_id}.mp3"
+        audio_path = os.path.join(video_dir, audio_file)
+        audio_exists = os.path.exists(audio_path)
+        
+        # Если аудио нет, скачиваем его
+        if not audio_exists:
+            self.update_state(
+                state='PROGRESS',
+                meta={'status': 'Аудио не найдено. Загружаем аудио...', 'progress': 10}
+            )
+            
+            print(f"Аудио файл не найден. Загружаем аудио для {youtube_url}")
+            
+            # Запускаем задачу загрузки аудио синхронно (внутри задачи)
+            download_result = download_video_task.apply(args=[youtube_url, True])
+            
+            if download_result.successful():
+                result = download_result.result
+                if isinstance(result, dict) and result.get('status') == 'failed':
+                    raise Exception(f"Ошибка загрузки аудио: {result.get('error', 'Неизвестная ошибка')}")
+            else:
+                raise Exception(f"Ошибка загрузки аудио: {str(download_result.info)}")
+            
+            # Проверяем, что файл появился
+            if not os.path.exists(audio_path):
+                raise Exception("Аудио файл не был создан после загрузки")
+            
+            print(f"Аудио успешно загружено: {audio_file}")
+        else:
+            print(f"Используем существующий аудио файл: {audio_file}")
+        
+        # Запускаем транскрипцию
+        self.update_state(
+            state='PROGRESS',
+            meta={'status': 'Начинаем транскрипцию...', 'progress': 50}
+        )
+        
+        # Используем transcribe_audio_task для транскрипции
+        transcription_result = transcribe_audio_task.apply(
+            args=[audio_path, youtube_id, model_size]
+        )
+        
+        if transcription_result.successful():
+            result = transcription_result.result
+            if isinstance(result, dict) and result.get('status') == 'failed':
+                raise Exception(f"Ошибка транскрипции: {result.get('error', 'Неизвестная ошибка')}")
+            
+            # Проверяем, что JSON файл создан
+            if not os.path.exists(json_path):
+                raise Exception("JSON файл не был создан после транскрипции")
+            
+            file_size = os.path.getsize(json_path)
+            
+            self.update_state(
+                state='PROGRESS',
+                meta={'status': 'JSON файл создан успешно', 'progress': 100}
+            )
+            
+            return {
+                'status': 'completed',
+                'progress': 100,
+                'message': 'JSON файл успешно создан',
+                'file_path': json_path,
+                'file_name': json_file,
+                'file_size': file_size,
+                'youtube_id': youtube_id,
+                'cached': False,
+                'audio_cached': audio_exists
+            }
+        else:
+            raise Exception(f"Ошибка транскрипции: {str(transcription_result.info)}")
+        
+    except Exception as e:
+        error_message = str(e)
+        print(f"Ошибка создания JSON: {error_message}")
+        
+        self.update_state(
+            state='FAILURE',
+            meta={
+                'status': 'Ошибка создания JSON',
+                'error': error_message,
+                'exc_type': type(e).__name__
+            }
+        )
+        
+        return {
+            'status': 'failed',
+            'error': error_message,
+            'exc_type': type(e).__name__
+        }

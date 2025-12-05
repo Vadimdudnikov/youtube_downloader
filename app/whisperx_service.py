@@ -11,6 +11,18 @@ from app.config import settings
 import whisperx
 import torch
 
+# Исправление для PyTorch 2.6+ (weights_only=True по умолчанию)
+# WhisperX/Pyannote используют omegaconf.ListConfig, который нужно разрешить
+try:
+    from omegaconf import ListConfig
+    torch.serialization.add_safe_globals([ListConfig])
+except ImportError:
+    pass
+
+# Альтернативный способ - установить переменную окружения
+# Это нужно сделать до импорта whisperx
+os.environ.setdefault('TORCH_LOAD_WEIGHTS_ONLY', 'False')
+
 import warnings
 
 # Отключаем предупреждения

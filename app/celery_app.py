@@ -32,6 +32,7 @@ celery_app.conf.update(
     },
     task_routes={
         'app.tasks.transcribe_audio_task': {'queue': 'transcription'},
+        'app.tasks.create_srt_from_youtube_task': {'queue': 'transcription'},
     },
 )
 
