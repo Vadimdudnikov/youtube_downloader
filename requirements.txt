@@ -15,20 +15,5 @@ redis==5.0.1
 requests==2.31.0
 
 # WhisperX (стабильная версия, совместима с pyannote.audio 2.1.1)
-whisperx==3.1.1
+whisperx
 omegaconf==2.3.0
-
-# PyTorch GPU (CUDA 11.8)
-torch==2.1.0
-torchaudio==2.1.0
-torchvision==0.16.0
-
-# Faster Whisper backend
-ctranslate2==3.21.0
-faster-whisper==0.10.0
-
-numpy==1.26.4
-
-# Стабильная диаризация
-pyannote.audio==2.1.1
-transformers==4.35.2
