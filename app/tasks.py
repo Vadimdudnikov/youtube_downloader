@@ -869,11 +869,13 @@ def create_srt_task(self, youtube_url: str, model_size: str = "medium"):
             )
             # Загружаем модель WhisperX с оптимизацией
             # torch.load уже запатчен глобально для совместимости с PyTorch 2.6+
+            # Используем silero VAD вместо pyannote.audio для избежания проблем с несовместимостью версий
             model = whisperx.load_model(
                 model_size, 
                 device=device, 
                 compute_type=compute_type,
-                language=None  # Автоопределение языка
+                language=None,  # Автоопределение языка
+                vad_model="silero"  # Используем silero VAD вместо pyannote.audio
             )
             
             _whisper_models_cache[cache_key] = model
