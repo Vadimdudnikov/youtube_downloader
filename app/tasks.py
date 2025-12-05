@@ -387,12 +387,17 @@ def create_srt_task(self, youtube_url: str, model_size: str = "medium"):
                 "--model", model_size,
                 "--device", device,
                 "--output_dir", temp_dir,
-                "--output_format", "json"
+                "--output_format", "json",
+                "--no_align"  # Отключаем alignment (не нужен для JSON)
             ]
 
             # Добавляем compute_type если нужно
             if compute_type:
                 cmd.extend(["--compute_type", compute_type])
+            
+            # Используем silero VAD вместо pyannote чтобы избежать проблем с cudnn
+            # silero VAD не требует cudnn и более стабилен
+            cmd.extend(["--vad_method", "silero"])
             
             print(f"Выполняем команду: {' '.join(cmd)}")
             
