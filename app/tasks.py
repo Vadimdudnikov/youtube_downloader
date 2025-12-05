@@ -10,6 +10,7 @@ from celery import current_task
 from app.celery_app import celery_app
 from app.proxy_manager import proxy_manager
 from app.config import settings
+from app.rapidapi_service import RapidAPIService
 import whisperx
 import torch
 
@@ -78,36 +79,22 @@ def ensure_directories():
 
 
 def get_video_info(youtube_url: str) -> dict:
-    """Получаем информацию о видео без загрузки"""
+    """Получаем информацию о видео через RapidAPI"""
     try:
-        ytdlp_base = get_ytdlp_path()
-        if isinstance(ytdlp_base, list):
-            cmd = ytdlp_base.copy()
-        else:
-            cmd = [ytdlp_base]
+        # Используем RapidAPI для получения информации о видео
+        rapidapi = RapidAPIService()
+        video_id = rapidapi.get_video_id_from_url(youtube_url)
         
-        cmd.extend([
-            '--dump-json',
-            '--skip-download',
-            '--quiet',
-            '--no-warnings',
-            youtube_url
-        ])
+        # Получаем информацию от RapidAPI
+        info = rapidapi.get_info_from_rapidapi(video_id, timeout=30, max_retries=1)
         
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-        
-        if result.returncode == 0:
-            import json
-            info = json.loads(result.stdout)
-            return {
-                'title': info.get('title', 'Unknown'),
-                'duration': info.get('duration', 0),
-                'uploader': info.get('uploader', 'Unknown'),
-                'view_count': info.get('view_count', 0),
-                'upload_date': info.get('upload_date', ''),
-            }
-        else:
-            raise Exception(result.stderr or "Не удалось получить информацию о видео")
+        return {
+            'title': info.get('title', 'Unknown'),
+            'duration': info.get('duration', 0),
+            'uploader': info.get('uploader', 'Unknown'),
+            'view_count': info.get('view_count', 0),
+            'upload_date': info.get('upload_date', ''),
+        }
     except Exception as e:
         print(f"Ошибка получения информации о видео: {e}")
         return {
@@ -137,418 +124,36 @@ def extract_youtube_id(url: str) -> str:
     return hashlib.md5(url.encode()).hexdigest()[:11]
 
 
-def is_authentication_error(error_message: str) -> bool:
-    """Проверяем, является ли ошибка связанной с аутентификацией"""
-    auth_keywords = [
-        'sign in to confirm',
-        'please sign in',
-        'authentication required',
-        'login required',
-        'cookies',
-        'age verification',
-        'age-restricted',
-        'private video',
-        'members-only',
-        'premium content',
-        'subscription required'
-    ]
-    
-    error_lower = error_message.lower()
-    return any(keyword in error_lower for keyword in auth_keywords)
 
 
-def validate_cookies_file(cookie_file: str) -> bool:
-    """Проверяет формат файла cookies (Netscape format)"""
-    try:
-        if not os.path.exists(cookie_file):
-            return False
-        
-        with open(cookie_file, 'r', encoding='utf-8') as f:
-            lines = f.readlines()
-        
-        valid_lines = 0
-        for line_num, line in enumerate(lines, 1):
-            line = line.strip()
-            # Пропускаем пустые строки и комментарии
-            if not line or line.startswith('#'):
-                continue
-            
-            # Формат Netscape: domain, flag, path, secure, expiration, name, value
-            # Все поля разделены табуляцией
-            parts = line.split('\t')
-            if len(parts) >= 7:
-                valid_lines += 1
-            elif len(parts) > 0:
-                print(f"⚠️  Строка {line_num} в cookies файле имеет неправильный формат (ожидается 7 полей, найдено {len(parts)}): {line[:50]}...")
-        
-        if valid_lines == 0:
-            print(f"❌ Файл cookies не содержит валидных записей в формате Netscape")
-            return False
-        
-        print(f"✅ Файл cookies содержит {valid_lines} валидных записей")
-        return True
-    except Exception as e:
-        print(f"❌ Ошибка при проверке файла cookies: {e}")
-        return False
-
-
-def download_with_multiple_clients(youtube_url: str, output_path: str, audio_only: bool = False,
-                                   use_cookies: bool = False, cookies_path: str = None, 
-                                   proxy_url: str = None) -> dict:
-    """
-    Пробует загрузить видео, перебирая все доступные клиенты YouTube
-    """
-    # Список всех доступных клиентов YouTube
-    # Если есть cookies, пробуем сначала клиенты, которые их поддерживают
-    if use_cookies and cookies_path and os.path.exists(cookies_path):
-        clients_order = ['mobile', 'web', 'ios', 'mweb', 'android', 'tv_embedded', 'tv']
-    else:
-        # Если нет cookies, пробуем все клиенты, начиная с mobile
-        clients_order = ['mobile', 'web', 'android', 'ios', 'tv_embedded', 'mweb', 'tv']
-    
-    last_error = None
-    
-    for client in clients_order:
-        try:
-            print(f"🔄 Пробуем клиент: {client}")
-            result = download_with_retry(
-                youtube_url=youtube_url,
-                output_path=output_path,
-                audio_only=audio_only,
-                use_cookies=use_cookies,
-                cookies_path=cookies_path,
-                proxy_url=proxy_url,
-                player_client=client
-            )
-            
-            if result['success']:
-                print(f"✅ Успешно загружено с клиентом: {client}")
-                return result
-            else:
-                last_error = result['error']
-                error_preview = str(result['error'])[:100] if result['error'] else "Неизвестная ошибка"
-                print(f"❌ Клиент {client} не сработал: {error_preview}...")
-                continue
-                
-        except Exception as e:
-            last_error = str(e)
-            print(f"❌ Ошибка с клиентом {client}: {str(e)[:100]}...")
-            continue
-    
-    # Если все клиенты не сработали, возвращаем последнюю ошибку
-    return {
-        'success': False,
-        'error': f"Все клиенты не сработали. Последняя ошибка: {last_error}",
-        'error_type': 'AllClientsFailed'
-    }
-
-
-def get_ytdlp_path():
-    """Определяет путь к yt-dlp"""
-    # Пробуем найти yt-dlp в стандартных местах
-    possible_paths = [
-        "/usr/local/bin/yt-dlp",
-        "/usr/bin/yt-dlp",
-        "yt-dlp"  # В PATH
-    ]
-    
-    for path in possible_paths:
-        try:
-            result = subprocess.run([path, '--version'], 
-                                  capture_output=True, timeout=5)
-            if result.returncode == 0:
-                return path
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            continue
-    
-    # Если не нашли, используем через python модуль
-    return [sys.executable, '-m', 'yt_dlp']
-
-
-def download_with_retry(youtube_url: str, output_path: str, audio_only: bool = False, 
-                        use_cookies: bool = False, cookies_path: str = None, 
-                        proxy_url: str = None, player_client: str = 'mobile') -> dict:
-    """Загружаем видео через командную строку yt-dlp"""
-    try:
-        # Определяем путь к yt-dlp
-        ytdlp_base = get_ytdlp_path()
-        if isinstance(ytdlp_base, list):
-            cmd = ytdlp_base.copy()
-        else:
-            cmd = [ytdlp_base]
-        
-        # Базовые параметры
-        cmd.extend([
-            '--extractor-args', f'youtube:player_client={player_client},no_sabr=1',
-            '--no-warnings',
-            '--quiet',
-        ])
-        
-        # Добавляем прокси если есть
-        if proxy_url:
-            cmd.extend(['--proxy', proxy_url])
-        
-        # Добавляем cookies если есть
-        if use_cookies:
-            cookie_file = cookies_path or settings.cookies_file
-            if not os.path.isabs(cookie_file):
-                cookie_file = os.path.join(os.getcwd(), cookie_file)
-            
-            if os.path.exists(cookie_file):
-                # Проверяем формат файла
-                is_valid = validate_cookies_file(cookie_file)
-                cmd.extend(['--cookies', cookie_file])
-                
-                if is_valid:
-                    print(f"✅ Используем cookies из файла: {cookie_file}")
-                else:
-                    print(f"⚠️  ВНИМАНИЕ: Файл cookies имеет неправильный формат!")
-            else:
-                print(f"⚠️  Файл cookies не найден: {cookie_file}")
-        
-        # Формат и выходной файл
-        if audio_only:
-            cmd.extend(['-f', 'bestaudio'])
-            # Для аудио нужно будет конвертировать в MP3 через FFmpeg
-            cmd.extend(['-x', '--audio-format', 'mp3', '--audio-quality', '192K'])
-        else:
-            cmd.extend(['-f', 'best[height<=720]'])
-        
-        cmd.extend(['-o', output_path])
-        cmd.append(youtube_url)
-        
-        print(f"Выполняем команду: {' '.join(cmd[:10])}...")  # Показываем только начало команды
-        
-        # Запускаем команду
-        process = subprocess.run(cmd, text=True, capture_output=True, timeout=600)
-        
-        if process.returncode == 0:
-            # Получаем информацию о видео для возврата
-            try:
-                video_info = get_video_info(youtube_url)
-                video_title = video_info.get('title', 'Unknown')
-                video_duration = video_info.get('duration', 0)
-            except Exception as e:
-                print(f"Не удалось получить метаданные: {e}")
-                video_title = 'Unknown'
-                video_duration = 0
-            
-            return {
-                'success': True,
-                'title': video_title,
-                'duration': video_duration
-            }
-        else:
-            error_msg = process.stderr or process.stdout or "Неизвестная ошибка"
-            return {
-                'success': False,
-                'error': error_msg,
-                'error_type': 'YtDlpError'
-            }
-            
-    except subprocess.TimeoutExpired:
-        return {
-            'success': False,
-            'error': 'Таймаут при загрузке',
-            'error_type': 'TimeoutError'
-        }
-    except Exception as e:
-        return {
-            'success': False,
-            'error': str(e),
-            'error_type': type(e).__name__
-        }
-
-
-def check_and_update_ytdlp():
-    """Проверяем и обновляем yt-dlp до nightly-версии с GitHub"""
-    try:
-        # Проверяем текущую версию
-        ytdlp_path = get_ytdlp_path()
-        if isinstance(ytdlp_path, list):
-            # Используем через python модуль
-            result = subprocess.run([sys.executable, '-m', 'yt_dlp', '--version'], 
-                                  capture_output=True, text=True, timeout=30)
-        else:
-            result = subprocess.run([ytdlp_path, '--version'], 
-                                  capture_output=True, text=True, timeout=30)
-        
-        if result.returncode == 0:
-            current_version = result.stdout.strip()
-            print(f"Текущая версия yt-dlp: {current_version}")
-        else:
-            print(f"Предупреждение: не удалось проверить версию yt-dlp: {result.stderr}")
-        
-        # Скачиваем nightly-версию с GitHub
-        print("Скачиваем nightly-версию yt-dlp с GitHub...")
-        
-        # Создаем временный файл для скачивания
-        import tempfile
-        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.tmp')
-        temp_file.close()
-        
-        try:
-            # Скачиваем через curl
-            download_result = subprocess.run(
-                ['curl', '-L', 
-                 'https://github.com/yt-dlp/yt-dlp-nightly-builds/releases/latest/download/yt-dlp',
-                 '-o', temp_file.name],
-                capture_output=True, text=True, timeout=120
-            )
-            
-            if download_result.returncode != 0:
-                raise Exception(f"Ошибка скачивания yt-dlp: {download_result.stderr}")
-            
-            print("✅ yt-dlp скачан успешно")
-            
-            # Определяем пути для установки
-            venv_bin = os.path.dirname(sys.executable)
-            venv_ytdlp = os.path.join(venv_bin, 'yt-dlp')
-            system_ytdlp = '/usr/local/bin/yt-dlp'
-            
-            # Копируем в /usr/local/bin/yt-dlp
-            print(f"Копируем yt-dlp в {system_ytdlp}...")
-            try:
-                # Создаем директорию если её нет
-                os.makedirs(os.path.dirname(system_ytdlp), exist_ok=True)
-                shutil.copy2(temp_file.name, system_ytdlp)
-                os.chmod(system_ytdlp, 0o755)  # chmod +x
-                print(f"✅ yt-dlp скопирован в {system_ytdlp}")
-            except PermissionError:
-                print(f"⚠️  Нет прав для записи в {system_ytdlp}, пропускаем")
-            except Exception as e:
-                print(f"⚠️  Ошибка копирования в {system_ytdlp}: {e}")
-            
-            # Копируем в venv/bin/yt-dlp
-            print(f"Копируем yt-dlp в {venv_ytdlp}...")
-            try:
-                shutil.copy2(temp_file.name, venv_ytdlp)
-                os.chmod(venv_ytdlp, 0o755)  # chmod +x
-                print(f"✅ yt-dlp скопирован в {venv_ytdlp}")
-            except Exception as e:
-                print(f"⚠️  Ошибка копирования в {venv_ytdlp}: {e}")
-            
-            # Проверяем новую версию
-            if os.path.exists(venv_ytdlp):
-                new_result = subprocess.run([venv_ytdlp, '--version'], 
-                                         capture_output=True, text=True, timeout=30)
-            elif os.path.exists(system_ytdlp):
-                new_result = subprocess.run([system_ytdlp, '--version'], 
-                                         capture_output=True, text=True, timeout=30)
-            else:
-                new_result = subprocess.run([sys.executable, '-m', 'yt_dlp', '--version'], 
-                                         capture_output=True, text=True, timeout=30)
-            
-            if new_result.returncode == 0:
-                new_version = new_result.stdout.strip()
-                print(f"✅ Новая версия yt-dlp (nightly): {new_version}")
-            else:
-                print(f"⚠️  Не удалось проверить новую версию: {new_result.stderr}")
-                
-        finally:
-            # Удаляем временный файл
-            try:
-                os.unlink(temp_file.name)
-            except:
-                pass
-                
-    except FileNotFoundError:
-        # curl не найден
-        print("⚠️  curl не найден, пробуем альтернативный способ обновления...")
-        try:
-            # Альтернативный способ - через pip pre-release
-            alt_update = subprocess.run(
-                [sys.executable, '-m', 'pip', 'install', '-U', '--pre', 'yt-dlp'],
-                capture_output=True, text=True, timeout=120
-            )
-            if alt_update.returncode == 0:
-                print("✅ yt-dlp обновлён до pre-release версии")
-        except Exception as e:
-            print(f"❌ Ошибка при обновлении yt-dlp: {e}")
-    except subprocess.TimeoutExpired:
-        print("⚠️  Таймаут при обновлении yt-dlp")
-    except Exception as e:
-        print(f"❌ Ошибка при обновлении yt-dlp: {e}")
 
 
 @celery_app.task(bind=True)
 def download_video_task(self, youtube_url: str, audio_only: bool = False):
     """
-    Задача для загрузки видео или аудио с YouTube с поддержкой прокси и cookies
+    Задача для загрузки аудио с YouTube через RapidAPI
     """
-    
-    def update_progress(d):
-        """Обновление прогресса загрузки"""
-        if d['status'] == 'downloading':
-            if 'total_bytes' in d and d['total_bytes']:
-                progress = (d['downloaded_bytes'] / d['total_bytes']) * 100
-                download_type = "аудио" if audio_only else "видео"
-                self.update_state(
-                    state='PROGRESS',
-                    meta={
-                        'status': f'Загружаем {download_type}...',
-                        'progress': int(progress),
-                        'downloaded_bytes': d['downloaded_bytes'],
-                        'total_bytes': d['total_bytes']
-                    }
-                )
-    
-    # Инициализируем current_proxy до try блока, чтобы она точно была доступна в except
-    current_proxy = None
-    
     try:
-        # Проверяем и обновляем yt-dlp
-        check_and_update_ytdlp()
+        # RapidAPI поддерживает только аудио
+        if not audio_only:
+            return {
+                'status': 'failed',
+                'error': 'RapidAPI поддерживает только загрузку аудио. Используйте audio_only=True.',
+                'exc_type': 'UnsupportedOperation'
+            }
         
         # Проверяем FFmpeg для аудио конвертации
-        if audio_only:
-            try:
-                subprocess.run(['ffmpeg', '-version'], capture_output=True, check=True)
-            except (subprocess.CalledProcessError, FileNotFoundError):
-                return {
-                    'status': 'failed',
-                    'error': 'FFmpeg не найден. Установите FFmpeg для конвертации аудио в MP3.',
-                    'exc_type': 'FFmpegNotFound'
-                }
+        try:
+            subprocess.run(['ffmpeg', '-version'], capture_output=True, check=True)
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            return {
+                'status': 'failed',
+                'error': 'FFmpeg не найден. Установите FFmpeg для конвертации аудио в MP3.',
+                'exc_type': 'FFmpegNotFound'
+            }
         
         # Обновляем статус задачи
-        self.update_state(state='PROGRESS', meta={'status': 'Начинаем загрузку...', 'progress': 0})
-        
-        # Проверяем и обновляем прокси если нужно
-        if proxy_manager.should_update_proxies():
-            asyncio.run(proxy_manager.update_working_proxies())
-        
-        # Получаем прокси объект для отслеживания
-        proxy_obj = None
-        proxy_url = None
-        # current_proxy уже инициализирована выше как None
-        
-        try:
-            proxy_obj = proxy_manager.get_next_proxy()
-            if proxy_obj:
-                print(f"[PROXY] Получен прокси: IP={proxy_obj.get('ip')}, Port={proxy_obj.get('port')}, Country={proxy_obj.get('country')}, City={proxy_obj.get('city')}")
-            else:
-                print(f"[PROXY] Прокси не получен: список прокси пуст или недоступен")
-        except Exception as proxy_error:
-            print(f"[PROXY ERROR] Ошибка при получении прокси: {proxy_error}")
-            import traceback
-            print(f"[PROXY ERROR] Traceback: {traceback.format_exc()}")
-            proxy_obj = None
-        
-        # Всегда устанавливаем current_proxy, даже если proxy_obj = None
-        if proxy_obj:
-            # Создаем URL прокси для yt-dlp
-            if proxy_obj.get('username') and proxy_obj.get('password'):
-                proxy_url = f"http://{proxy_obj['username']}:{proxy_obj['password']}@{proxy_obj['ip']}:{proxy_obj['port']}"
-                print(f"[PROXY] Используем прокси с авторизацией: {proxy_obj['ip']}:{proxy_obj['port']}")
-            else:
-                proxy_url = f"http://{proxy_obj['ip']}:{proxy_obj['port']}"
-                print(f"[PROXY] Используем прокси без авторизации: {proxy_obj['ip']}:{proxy_obj['port']}")
-            current_proxy = proxy_obj
-        else:
-            # Убеждаемся, что current_proxy явно установлена в None если прокси нет
-            current_proxy = None
-            print(f"[PROXY] Прокси не используется для этой загрузки")
+        self.update_state(state='PROGRESS', meta={'status': 'Начинаем загрузку через RapidAPI...', 'progress': 0})
         
         # Убеждаемся, что папки существуют
         video_dir, srt_dir = ensure_directories()
@@ -558,26 +163,12 @@ def download_video_task(self, youtube_url: str, audio_only: bool = False):
         print(f"YouTube ID: {youtube_id}")
         
         # Проверяем, есть ли файл уже локально
-        existing_file = None
-        if audio_only:
-            # Ищем MP3 файл
-            mp3_file = f"{youtube_id}.mp3"
-            mp3_path = os.path.join(video_dir, mp3_file)
-            if os.path.exists(mp3_path):
-                existing_file = mp3_file
-        else:
-            # Ищем видео файл (любое расширение)
-            for file in os.listdir(video_dir):
-                if file.startswith(youtube_id) and not file.endswith('.mp3'):
-                    existing_file = file
-                    break
+        mp3_file = f"{youtube_id}.mp3"
+        mp3_path = os.path.join(video_dir, mp3_file)
         
-        if existing_file:
-            file_path = os.path.join(video_dir, existing_file)
-            file_size = os.path.getsize(file_path)
-            download_type = "аудио" if audio_only else "видео"
-            
-            print(f"Файл уже существует локально: {existing_file}")
+        if os.path.exists(mp3_path):
+            file_size = os.path.getsize(mp3_path)
+            print(f"Файл уже существует локально: {mp3_file}")
             
             # Получаем информацию о видео для кэшированного файла
             video_info = get_video_info(youtube_url)
@@ -585,185 +176,67 @@ def download_video_task(self, youtube_url: str, audio_only: bool = False):
             return {
                 'status': 'completed',
                 'progress': 100,
-                'message': f'{download_type.capitalize()} найдено локально (пропущена загрузка)',
-                'file_path': file_path,
-                'file_name': existing_file,
+                'message': 'Аудио найдено локально (пропущена загрузка)',
+                'file_path': mp3_path,
+                'file_name': mp3_file,
                 'file_size': file_size,
                 'title': video_info['title'],
                 'duration': video_info['duration'],
                 'uploader': video_info['uploader'],
                 'view_count': video_info['view_count'],
                 'upload_date': video_info['upload_date'],
-                'download_type': download_type,
+                'download_type': 'аудио',
                 'youtube_id': youtube_id,
                 'cached': True
             }
         
-        # Определяем путь для выходного файла
-        if audio_only:
-            output_path = f'{video_dir}/{youtube_id}.%(ext)s'  # Будет конвертирован в MP3
-        else:
-            output_path = f'{video_dir}/{youtube_id}.%(ext)s'
+        # Инициализируем RapidAPI сервис
+        self.update_state(state='PROGRESS', meta={'status': 'Подключаемся к RapidAPI...', 'progress': 10})
+        rapidapi = RapidAPIService()
         
-        # Проверяем наличие cookies файла
-        cookies_path = settings.cookies_file
-        # Если путь относительный, делаем его абсолютным относительно корня проекта
-        if not os.path.isabs(cookies_path):
-            cookies_path = os.path.join(os.getcwd(), cookies_path)
+        # Скачиваем аудио через RapidAPI
+        self.update_state(state='PROGRESS', meta={'status': 'Скачиваем аудио через RapidAPI...', 'progress': 20})
+        print(f"Начинаем загрузку аудио через RapidAPI для {youtube_url}")
         
-        cookies_exist = os.path.exists(cookies_path)
-        if cookies_exist:
-            print(f"✅ Найден файл cookies: {cookies_path}")
-            print(f"   Размер файла: {os.path.getsize(cookies_path)} байт")
-        else:
-            print(f"❌ Файл cookies не найден: {cookies_path}")
-            print(f"   Текущая рабочая директория: {os.getcwd()}")
-            # Пробуем найти файл в корне проекта
-            project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            alt_cookies_path = os.path.join(project_root, "cookies.txt")
-            if os.path.exists(alt_cookies_path):
-                print(f"   Найден альтернативный путь: {alt_cookies_path}")
-                cookies_path = alt_cookies_path
-                cookies_exist = True
-        
-        # Формируем URL прокси если доступен
-        proxy_url_str = None
-        if proxy_url:
-            print(f"Используем прокси: {proxy_url}")
-            proxy_url_str = proxy_url
-        
-        download_type = "аудио" if audio_only else "видео"
-        
-        # Если cookies файл существует, используем его сразу
-        if cookies_exist:
-            self.update_state(
-                state='PROGRESS', 
-                meta={
-                    'status': f'Начинаем загрузку {download_type} с cookies (пробуем все клиенты)...',
-                    'progress': 5
-                }
-            )
-            result = download_with_multiple_clients(
-                youtube_url=youtube_url,
-                output_path=output_path,
-                audio_only=audio_only,
-                use_cookies=True,
-                cookies_path=cookies_path,
-                proxy_url=proxy_url_str
-            )
-        else:
-            # Первая попытка загрузки без куки
-            self.update_state(
-                state='PROGRESS', 
-                meta={
-                    'status': f'Начинаем загрузку {download_type} (пробуем все клиенты)...',
-                    'progress': 5
-                }
-            )
-            result = download_with_multiple_clients(
-                youtube_url=youtube_url,
-                output_path=output_path,
-                audio_only=audio_only,
-                use_cookies=False,
-                cookies_path=None,
-                proxy_url=proxy_url_str
-            )
-        
-        # Если первая попытка не удалась и ошибка связана с аутентификацией, пробуем с куки (если еще не пробовали)
-        if not result['success'] and is_authentication_error(result['error']) and not cookies_exist:
-            print(f"Обнаружена ошибка аутентификации: {result['error']}")
-            print("Пробуем повторную загрузку с куки...")
-            
-            # Пробуем найти cookies файл еще раз
-            retry_cookies_path = cookies_path
-            if not retry_cookies_path or not os.path.exists(retry_cookies_path):
-                project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-                retry_cookies_path = os.path.join(project_root, "cookies.txt")
-            
-            self.update_state(
-                state='PROGRESS', 
-                meta={
-                    'status': f'Повторная попытка загрузки {download_type} с куки (пробуем все клиенты)...',
-                    'progress': 10
-                }
-            )
-            
-            result = download_with_multiple_clients(
-                youtube_url=youtube_url,
-                output_path=output_path,
-                audio_only=audio_only,
-                use_cookies=True,
-                cookies_path=retry_cookies_path,
-                proxy_url=proxy_url_str
-            )
-        
-        # Если обе попытки не удались, поднимаем исключение
-        if not result['success']:
-            raise Exception(result['error'])
-        
-        video_title = result['title']
-        video_duration = result['duration']
-        
-        self.update_state(
-            state='PROGRESS', 
-            meta={
-                'status': f'{download_type.capitalize()} загружено: {video_title}',
-                'progress': 90,
-                'title': video_title,
-                'duration': video_duration
-            }
+        downloaded_path = rapidapi.download_youtube_audio(
+            url=youtube_url,
+            output_path=mp3_path
         )
         
-        # Ищем загруженный файл по YouTube ID
-        downloaded_file = None
+        if not os.path.exists(downloaded_path):
+            raise Exception(f"Файл не был создан после загрузки: {downloaded_path}")
         
-        for file in os.listdir(video_dir):
-            # Для аудио ищем .mp3 файлы с YouTube ID, для видео - любые файлы с YouTube ID
-            if audio_only:
-                if file.startswith(youtube_id) and file.endswith('.mp3'):
-                    downloaded_file = file
-                    break
-            else:
-                if file.startswith(youtube_id):
-                    downloaded_file = file
-                    break
+        file_size = os.path.getsize(downloaded_path)
+        print(f"✅ Аудио успешно загружено: {mp3_file} ({file_size / 1024 / 1024:.2f} МБ)")
         
-        if downloaded_file:
-            file_path = os.path.join(video_dir, downloaded_file)
-            file_size = os.path.getsize(file_path)
-            
-            return {
-                'status': 'completed',
-                'progress': 100,
-                'message': f'{download_type.capitalize()} успешно загружено',
-                'file_path': file_path,
-                'file_name': downloaded_file,
-                'file_size': file_size,
-                'title': video_title,
-                'duration': video_duration,
-                'download_type': download_type,
-                'youtube_id': youtube_id,
-                'cached': False
-            }
-        else:
-            # Если файл не найден, выводим список файлов для отладки
-            files_in_video = os.listdir(video_dir)
-            print(f"Файлы в папке video: {files_in_video}")
-            print(f"Ищем файл с префиксом: {youtube_id}")
-            raise Exception(f"Файл не найден после загрузки. YouTube ID: {youtube_id}")
+        # Получаем информацию о видео
+        video_info = get_video_info(youtube_url)
+        
+        self.update_state(
+            state='PROGRESS',
+            meta={'status': 'Загрузка завершена', 'progress': 100}
+        )
+        
+        return {
+            'status': 'completed',
+            'progress': 100,
+            'message': 'Аудио успешно загружено через RapidAPI',
+            'file_path': downloaded_path,
+            'file_name': mp3_file,
+            'file_size': file_size,
+            'title': video_info['title'],
+            'duration': video_info['duration'],
+            'uploader': video_info['uploader'],
+            'view_count': video_info['view_count'],
+            'upload_date': video_info['upload_date'],
+            'download_type': 'аудио',
+            'youtube_id': youtube_id,
+            'cached': False
+        }
                 
     except Exception as e:
-        # Если ошибка связана с прокси, помечаем его как нерабочий
-        # Используем проверку на наличие переменной через locals() для безопасности
-        try:
-            if current_proxy is not None and ("proxy" in str(e).lower() or "connection" in str(e).lower()):
-                proxy_manager.mark_proxy_failed(current_proxy)
-                print(f"Прокси помечен как нерабочий из-за ошибки: {e}")
-        except (UnboundLocalError, NameError):
-            # Переменная current_proxy не была инициализирована
-            pass
-        
         error_message = str(e)
+        print(f"Ошибка загрузки через RapidAPI: {error_message}")
         self.update_state(
             state='FAILURE',
             meta={
@@ -772,7 +245,6 @@ def download_video_task(self, youtube_url: str, audio_only: bool = False):
                 'exc_type': type(e).__name__
             }
         )
-        # Не поднимаем исключение, чтобы избежать проблем с Celery
         return {
             'status': 'failed',
             'error': error_message,
@@ -786,14 +258,6 @@ def update_proxies_task():
     return f"Обновлено {len(proxy_manager.working_proxies)} рабочих прокси"
 
 
-@celery_app.task
-def update_ytdlp_task():
-    """Задача для обновления yt-dlp"""
-    try:
-        check_and_update_ytdlp()
-        return "yt-dlp обновлён успешно"
-    except Exception as e:
-        return f"Ошибка обновления yt-dlp: {str(e)}"
 
 
 def format_timestamp(seconds: float) -> str:

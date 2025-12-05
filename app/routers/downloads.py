@@ -4,7 +4,7 @@ from pydantic import BaseModel, HttpUrl
 from typing import Optional
 import os
 
-from app.tasks import download_video_task, update_proxies_task, update_ytdlp_task, create_srt_task
+from app.tasks import download_video_task, update_proxies_task, create_srt_task
 from app.proxy_manager import proxy_manager
 
 router = APIRouter()
@@ -212,16 +212,6 @@ async def update_proxies():
 
 
 @router.post("/ytdlp/update")
-async def update_ytdlp():
-    """Обновить yt-dlp до последней версии"""
-    try:
-        task = update_ytdlp_task.delay()
-        return {
-            "task_id": task.id,
-            "message": "Задача обновления yt-dlp запущена"
-        }
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Ошибка обновления yt-dlp: {str(e)}")
 
 
 @router.post("/srt", response_model=SRTResponse)
