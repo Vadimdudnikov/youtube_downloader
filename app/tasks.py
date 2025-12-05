@@ -4,6 +4,7 @@ import asyncio
 import subprocess
 import sys
 import re
+import copy
 from celery import current_task
 from app.celery_app import celery_app
 from app.proxy_manager import proxy_manager
@@ -124,6 +125,57 @@ def validate_cookies_file(cookie_file: str) -> bool:
     except Exception as e:
         print(f"❌ Ошибка при проверке файла cookies: {e}")
         return False
+
+
+def download_with_multiple_clients(ydl_opts: dict, youtube_url: str, use_cookies: bool = False, cookies_path: str = None) -> dict:
+    """
+    Пробует загрузить видео, перебирая все доступные клиенты YouTube
+    """
+    # Список всех доступных клиентов YouTube
+    # Если есть cookies, пробуем сначала клиенты, которые их поддерживают
+    if use_cookies and cookies_path and os.path.exists(cookies_path):
+        clients_order = ['web', 'ios', 'mweb', 'android', 'tv_embedded', 'tv']
+    else:
+        # Если нет cookies, пробуем все клиенты
+        clients_order = ['web', 'android', 'ios', 'tv_embedded', 'mweb', 'tv']
+    
+    last_error = None
+    
+    for client in clients_order:
+        try:
+            # Глубокое копирование настроек для текущего клиента
+            test_opts = copy.deepcopy(ydl_opts)
+            
+            # Устанавливаем player_client для текущего клиента
+            if 'extractor_args' not in test_opts:
+                test_opts['extractor_args'] = {}
+            if 'youtube' not in test_opts['extractor_args']:
+                test_opts['extractor_args']['youtube'] = {}
+            
+            test_opts['extractor_args']['youtube']['player_client'] = [client]
+            
+            print(f"🔄 Пробуем клиент: {client}")
+            result = download_with_retry(test_opts, youtube_url, use_cookies, cookies_path)
+            
+            if result['success']:
+                print(f"✅ Успешно загружено с клиентом: {client}")
+                return result
+            else:
+                last_error = result['error']
+                print(f"❌ Клиент {client} не сработал: {result['error'][:100]}...")
+                continue
+                
+        except Exception as e:
+            last_error = str(e)
+            print(f"❌ Ошибка с клиентом {client}: {str(e)[:100]}...")
+            continue
+    
+    # Если все клиенты не сработали, возвращаем последнюю ошибку
+    return {
+        'success': False,
+        'error': f"Все клиенты не сработали. Последняя ошибка: {last_error}",
+        'error_type': 'AllClientsFailed'
+    }
 
 
 def download_with_retry(ydl_opts: dict, youtube_url: str, use_cookies: bool = False, cookies_path: str = None) -> dict:
@@ -365,11 +417,13 @@ def download_video_task(self, youtube_url: str, audio_only: bool = False):
                 'extract_flat': False,
                 'age_limit': None,
                 'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                'force_insecure': True,  # Принудительно разрешить insecure workaround для обхода ограничений
                 # Дополнительные настройки для обхода ограничений YouTube
+                # player_client будет установлен динамически в download_with_multiple_clients
                 'extractor_args': {
                     'youtube': {
                         'skip': ['dash', 'hls'],
-                        'player_client': ['android', 'web']
+                        'no_sabr': True  # Отключаем SABR streaming для обхода блокировок
                     }
                 }
             }
@@ -394,10 +448,11 @@ def download_video_task(self, youtube_url: str, audio_only: bool = False):
                 'age_limit': None,
                 'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
                 # Дополнительные настройки для обхода ограничений YouTube
+                # player_client будет установлен динамически в download_with_multiple_clients
                 'extractor_args': {
                     'youtube': {
                         'skip': ['dash', 'hls'],
-                        'player_client': ['android', 'web']
+                        'no_sabr': True  # Отключаем SABR streaming для обхода блокировок
                     }
                 }
             }
@@ -435,21 +490,21 @@ def download_video_task(self, youtube_url: str, audio_only: bool = False):
             self.update_state(
                 state='PROGRESS', 
                 meta={
-                    'status': f'Начинаем загрузку {download_type} с cookies...',
+                    'status': f'Начинаем загрузку {download_type} с cookies (пробуем все клиенты)...',
                     'progress': 5
                 }
             )
-            result = download_with_retry(ydl_opts, youtube_url, use_cookies=True, cookies_path=cookies_path)
+            result = download_with_multiple_clients(ydl_opts, youtube_url, use_cookies=True, cookies_path=cookies_path)
         else:
             # Первая попытка загрузки без куки
             self.update_state(
                 state='PROGRESS', 
                 meta={
-                    'status': f'Начинаем загрузку {download_type}...',
+                    'status': f'Начинаем загрузку {download_type} (пробуем все клиенты)...',
                     'progress': 5
                 }
             )
-            result = download_with_retry(ydl_opts, youtube_url, use_cookies=False)
+            result = download_with_multiple_clients(ydl_opts, youtube_url, use_cookies=False)
         
         # Если первая попытка не удалась и ошибка связана с аутентификацией, пробуем с куки (если еще не пробовали)
         if not result['success'] and is_authentication_error(result['error']) and not cookies_exist:
@@ -465,12 +520,12 @@ def download_video_task(self, youtube_url: str, audio_only: bool = False):
             self.update_state(
                 state='PROGRESS', 
                 meta={
-                    'status': f'Повторная попытка загрузки {download_type} с куки...',
+                    'status': f'Повторная попытка загрузки {download_type} с куки (пробуем все клиенты)...',
                     'progress': 10
                 }
             )
             
-            result = download_with_retry(ydl_opts, youtube_url, use_cookies=True, cookies_path=retry_cookies_path)
+            result = download_with_multiple_clients(ydl_opts, youtube_url, use_cookies=True, cookies_path=retry_cookies_path)
         
         # Если обе попытки не удались, поднимаем исключение
         if not result['success']:
