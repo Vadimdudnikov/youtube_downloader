@@ -5,11 +5,12 @@ import sys
 import re
 import copy
 import json
+import tempfile
+import shutil
 from celery import current_task
 from app.celery_app import celery_app
 from app.proxy_manager import proxy_manager
 from app.config import settings
-import whisperx
 import torch
 
 import warnings
@@ -60,8 +61,6 @@ try:
 except ImportError:
     pass
 
-# Глобальный кэш для моделей Whisper (чтобы не загружать каждый раз)
-_whisper_models_cache = {}
 
 
 def ensure_directories():
@@ -868,97 +867,117 @@ def create_srt_task(self, youtube_url: str, model_size: str = "medium"):
         else:
             print(f"Используем существующий аудио файл: {audio_file}")
         
-        # Загружаем модель Whisper
-        self.update_state(
-            state='PROGRESS',
-            meta={'status': f'Загружаем модель Whisper ({model_size})...', 'progress': 20}
-        )
-        
         # Определяем устройство (GPU или CPU)
         device = "cuda" if torch.cuda.is_available() else "cpu"
-        compute_type = "float16" if device == "cuda" else "int8"
         
         if device == "cuda":
             print(f"Используем GPU: {torch.cuda.get_device_name(0)}")
             print(f"CUDA версия: {torch.version.cuda}")
-            print(f"Compute type: {compute_type} (FP16)")
         else:
             print("GPU не доступен, используем CPU")
-            print(f"Compute type: {compute_type} (int8)")
         
-        # Кэшируем модель WhisperX (загружаем только один раз)
-        cache_key = f"{model_size}_{device}_{compute_type}"
-        if cache_key not in _whisper_models_cache:
-            print(f"Загружаем модель WhisperX: {model_size} на устройстве: {device} (первая загрузка, будет кэширована)")
-            self.update_state(
-                state='PROGRESS',
-                meta={'status': f'Загружаем модель WhisperX ({model_size})...', 'progress': 20}
-            )
-            # Загружаем модель WhisperX с оптимизацией
-            # torch.load уже запатчен глобально для совместимости с PyTorch 2.6+
-            # Используем silero VAD вместо pyannote.audio для избежания проблем с несовместимостью версий
-            model = whisperx.load_model(
-                model_size, 
-                device=device, 
-                compute_type=compute_type,
-                language=None,  # Автоопределение языка
-                vad_model="silero"  # Используем silero VAD вместо pyannote.audio
-            )
-
-            # Отключаем aligner полностью
-            model.align_model = None
-            model.aligner = None
-            
-            _whisper_models_cache[cache_key] = model
-            print(f"✅ Модель WhisperX загружена и закэширована")
-        else:
-            print(f"✅ Используем закэшированную модель WhisperX: {model_size} на {device}")
-            model = _whisper_models_cache[cache_key]
-        
-        # Распознаем речь
+        # Распознаем речь с WhisperX через командную строку
         self.update_state(
             state='PROGRESS',
             meta={'status': 'Распознаем речь...', 'progress': 40}
         )
         
         print(f"Начинаем распознавание речи из файла: {audio_path}")
+        print("Начинаем транскрибацию с WhisperX через CLI...")
         
-        # Распознаем речь с WhisperX
-        print("Начинаем транскрибацию с WhisperX...")
-        result = model.transcribe(
-            audio_path,
-            batch_size=16,  # Размер батча для обработки
-            language=None,  # Автоопределение языка
-            task="transcribe"
-        )
-
-        # WhisperX BUGFIX: rename language field so it is not treated as a callable
-        if isinstance(result.get("language"), str):
-            result["detected_language"] = result["language"]
-            result["language"] = None
-
-        
-        print(f"Транскрибация завершена. Язык: {result.get('language', 'unknown')}")
-        
-        # WhisperX возвращает результат с segments в нужном формате
-        # Извлекаем segments и конвертируем в нужный формат
-        segments_list = []
-        if 'segments' in result:
-            for segment in result['segments']:
-                segments_list.append({
+        # Создаем временную директорию для вывода WhisperX
+        temp_dir = tempfile.mkdtemp()
+        try:
+            # Определяем путь к whisperx (может быть в venv или системный)
+            # WhisperX обычно устанавливается как Python модуль, используем python -m whisperx
+            whisperx_cmd = [sys.executable, "-m", "whisperx"]
+            
+            # Формируем команду для WhisperX
+            cmd = whisperx_cmd + [
+                audio_path,
+                "--model", model_size,
+                "--device", device,
+                "--output_dir", temp_dir,
+                "--output_format", "json",
+                "--vad", "silero"  # Используем silero VAD
+            ]
+            
+            print(f"Выполняем команду: {' '.join(cmd)}")
+            
+            # Запускаем WhisperX
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                check=False
+            )
+            
+            if result.returncode != 0:
+                error_msg = result.stderr or result.stdout
+                print(f"Ошибка WhisperX: {error_msg}")
+                raise Exception(f"Ошибка транскрибации WhisperX: {error_msg}")
+            
+            print(f"WhisperX завершился успешно")
+            print(f"Вывод: {result.stdout[:500]}")  # Первые 500 символов
+            
+            # Ищем созданный JSON файл
+            # WhisperX создает файл с именем как у аудио файла, но с расширением .json
+            audio_basename = os.path.splitext(os.path.basename(audio_path))[0]
+            whisperx_json = os.path.join(temp_dir, f"{audio_basename}.json")
+            
+            if not os.path.exists(whisperx_json):
+                # Пробуем найти любой JSON файл в директории
+                json_files = [f for f in os.listdir(temp_dir) if f.endswith('.json')]
+                if json_files:
+                    whisperx_json = os.path.join(temp_dir, json_files[0])
+                else:
+                    raise Exception(f"JSON файл не найден в {temp_dir}")
+            
+            # Читаем результат из JSON файла
+            with open(whisperx_json, 'r', encoding='utf-8') as f:
+                whisperx_result = json.load(f)
+            
+            print(f"JSON файл прочитан: {whisperx_json}")
+            
+            # Извлекаем segments из результата WhisperX
+            # WhisperX может вернуть либо список segments, либо объект с ключом "segments"
+            segments_list = []
+            if isinstance(whisperx_result, list):
+                # Если это список segments
+                segments_list = whisperx_result
+            elif isinstance(whisperx_result, dict):
+                # Если это объект с ключом "segments"
+                if 'segments' in whisperx_result:
+                    segments_list = whisperx_result['segments']
+                else:
+                    # Если segments на верхнем уровне
+                    segments_list = [whisperx_result] if 'start' in whisperx_result else []
+            
+            # Преобразуем segments в нужный формат
+            formatted_segments = []
+            for segment in segments_list:
+                formatted_segments.append({
                     'start': segment.get('start', 0.0),
                     'end': segment.get('end', 0.0),
                     'text': segment.get('text', '').strip()
                 })
-        
-        # Генерируем JSON файл
-        self.update_state(
-            state='PROGRESS',
-            meta={'status': 'Генерируем JSON файл...', 'progress': 90}
-        )
-        
-        print(f"Генерируем JSON файл: {json_path}")
-        generate_json_from_segments(segments_list, json_path)
+            
+            print(f"Транскрибация завершена. Найдено сегментов: {len(formatted_segments)}")
+            
+            # Генерируем JSON файл в нужном формате
+            self.update_state(
+                state='PROGRESS',
+                meta={'status': 'Генерируем JSON файл...', 'progress': 90}
+            )
+            
+            print(f"Генерируем JSON файл: {json_path}")
+            generate_json_from_segments(formatted_segments, json_path)
+            
+        finally:
+            # Удаляем временную директорию
+            if os.path.exists(temp_dir):
+                shutil.rmtree(temp_dir)
+                print(f"Временная директория удалена: {temp_dir}")
         
         file_size = os.path.getsize(json_path)
         
