@@ -9,7 +9,7 @@ from celery import current_task
 from app.celery_app import celery_app
 from app.proxy_manager import proxy_manager
 from app.config import settings
-from faster_whisper import WhisperModel
+import whisperx
 import torch
 
 # Глобальный кэш для моделей Whisper (чтобы не загружать каждый раз)
@@ -720,24 +720,23 @@ def format_timestamp(seconds: float) -> str:
     return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
 
 
-def generate_srt_from_segments(segments: list, output_path: str) -> str:
-    """Генерирует SRT файл из сегментов распознавания речи"""
-    srt_content = []
+def generate_json_from_segments(segments: list, output_path: str) -> str:
+    """Генерирует JSON файл из сегментов распознавания речи"""
+    # Формируем массив объектов
+    json_data = []
     
-    for i, segment in enumerate(segments, start=1):
-        start_time = format_timestamp(segment['start'])
-        end_time = format_timestamp(segment['end'])
-        text = segment['text'].strip()
-        
-        srt_content.append(f"{i}\n{start_time} --> {end_time}\n{text}\n")
-    
-    srt_text = "\n".join(srt_content)
+    for segment in segments:
+        json_data.append({
+            'start': segment['start'],
+            'end': segment['end'],
+            'text': segment['text'].strip()
+        })
     
     # Сохраняем в файл
     with open(output_path, 'w', encoding='utf-8') as f:
-        f.write(srt_text)
+        json.dump(json_data, f, ensure_ascii=False, indent=4)
     
-    return srt_text
+    return json.dumps(json_data, ensure_ascii=False, indent=4)
 
 
 @celery_app.task(bind=True)
@@ -755,27 +754,27 @@ def create_srt_task(self, youtube_url: str, model_size: str = "medium"):
         
         # Извлекаем YouTube ID
         youtube_id = extract_youtube_id(youtube_url)
-        print(f"Создание SRT для YouTube ID: {youtube_id}")
+        print(f"Создание JSON субтитров для YouTube ID: {youtube_id}")
         
-        # Проверяем, существует ли уже SRT файл - если да, сразу возвращаем его
-        srt_file = f"{youtube_id}.srt"
-        srt_path = os.path.join(srt_dir, srt_file)
+        # Проверяем, существует ли уже JSON файл - если да, сразу возвращаем его
+        json_file = f"{youtube_id}.json"
+        json_path = os.path.join(srt_dir, json_file)
         
-        if os.path.exists(srt_path):
+        if os.path.exists(json_path):
             self.update_state(
                 state='PROGRESS',
-                meta={'status': 'SRT файл уже существует', 'progress': 100}
+                meta={'status': 'JSON файл уже существует', 'progress': 100}
             )
             
-            file_size = os.path.getsize(srt_path)
+            file_size = os.path.getsize(json_path)
             video_info = get_video_info(youtube_url)
             
             return {
                 'status': 'completed',
                 'progress': 100,
-                'message': 'SRT файл уже существует',
-                'file_path': srt_path,
-                'file_name': srt_file,
+                'message': 'JSON файл уже существует',
+                'file_path': json_path,
+                'file_name': json_file,
                 'file_size': file_size,
                 'youtube_id': youtube_id,
                 'title': video_info['title'],
@@ -839,25 +838,25 @@ def create_srt_task(self, youtube_url: str, model_size: str = "medium"):
             print("GPU не доступен, используем CPU")
             print(f"Compute type: {compute_type} (int8)")
         
-        # Кэшируем модель Whisper (загружаем только один раз)
+        # Кэшируем модель WhisperX (загружаем только один раз)
         cache_key = f"{model_size}_{device}_{compute_type}"
         if cache_key not in _whisper_models_cache:
-            print(f"Загружаем модель faster-whisper: {model_size} на устройстве: {device} (первая загрузка, будет кэширована)")
+            print(f"Загружаем модель WhisperX: {model_size} на устройстве: {device} (первая загрузка, будет кэширована)")
             self.update_state(
                 state='PROGRESS',
-                meta={'status': f'Загружаем модель Whisper ({model_size})...', 'progress': 20}
+                meta={'status': f'Загружаем модель WhisperX ({model_size})...', 'progress': 20}
             )
-            # Загружаем модель faster-whisper с оптимизацией
-            model = WhisperModel(
+            # Загружаем модель WhisperX с оптимизацией
+            model = whisperx.load_model(
                 model_size, 
                 device=device, 
                 compute_type=compute_type,
-                num_workers=1  # Количество потоков для обработки
+                language=None  # Автоопределение языка
             )
             _whisper_models_cache[cache_key] = model
-            print(f"✅ Модель faster-whisper загружена и закэширована")
+            print(f"✅ Модель WhisperX загружена и закэширована")
         else:
-            print(f"✅ Используем закэшированную модель faster-whisper: {model_size} на {device}")
+            print(f"✅ Используем закэшированную модель WhisperX: {model_size} на {device}")
             model = _whisper_models_cache[cache_key]
         
         # Распознаем речь
@@ -868,66 +867,53 @@ def create_srt_task(self, youtube_url: str, model_size: str = "medium"):
         
         print(f"Начинаем распознавание речи из файла: {audio_path}")
         
-        # Оптимизированные параметры для faster-whisper
-        transcribe_options = {
-            'beam_size': 5,  # Размер луча для поиска
-            'best_of': 5,  # Количество кандидатов
-            'temperature': 0,  # Температура для sampling (0 = greedy)
-            'compression_ratio_threshold': 2.4,  # Порог сжатия
-            'log_prob_threshold': -1.0,  # Порог вероятности
-            'no_speech_threshold': 0.6,  # Порог отсутствия речи
-            'condition_on_previous_text': True,  # Использовать предыдущий текст
-            'initial_prompt': None,  # Начальный промпт
-            'word_timestamps': False,  # Не нужны временные метки слов для SRT
-            'vad_filter': True,  # Фильтр голосовой активности для ускорения
-            'vad_parameters': {
-                'threshold': 0.5,
-                'min_speech_duration_ms': 250,
-                'max_speech_duration_s': float('inf'),
-                'min_silence_duration_ms': 2000,
-            }
-        }
-        
-        # Распознаем речь
-        print("Начинаем транскрибацию с faster-whisper...")
-        segments, info = model.transcribe(audio_path, **transcribe_options)
-        
-        # Конвертируем segments в формат для generate_srt_from_segments
-        segments_list = []
-        for segment in segments:
-            segments_list.append({
-                'start': segment.start,
-                'end': segment.end,
-                'text': segment.text
-            })
-        
-        print(f"Транскрибация завершена. Язык: {info.language}, вероятность: {info.language_probability:.2f}")
-        
-        # Генерируем SRT файл
-        self.update_state(
-            state='PROGRESS',
-            meta={'status': 'Генерируем SRT файл...', 'progress': 90}
+        # Распознаем речь с WhisperX
+        print("Начинаем транскрибацию с WhisperX...")
+        result = model.transcribe(
+            audio_path,
+            batch_size=16,  # Размер батча для обработки
+            language=None,  # Автоопределение языка
+            task="transcribe"
         )
         
-        print(f"Генерируем SRT файл: {srt_path}")
-        generate_srt_from_segments(segments_list, srt_path)
+        print(f"Транскрибация завершена. Язык: {result.get('language', 'unknown')}")
         
-        file_size = os.path.getsize(srt_path)
+        # WhisperX возвращает результат с segments в нужном формате
+        # Извлекаем segments и конвертируем в нужный формат
+        segments_list = []
+        if 'segments' in result:
+            for segment in result['segments']:
+                segments_list.append({
+                    'start': segment.get('start', 0.0),
+                    'end': segment.get('end', 0.0),
+                    'text': segment.get('text', '').strip()
+                })
+        
+        # Генерируем JSON файл
+        self.update_state(
+            state='PROGRESS',
+            meta={'status': 'Генерируем JSON файл...', 'progress': 90}
+        )
+        
+        print(f"Генерируем JSON файл: {json_path}")
+        generate_json_from_segments(segments_list, json_path)
+        
+        file_size = os.path.getsize(json_path)
         
         # Получаем информацию о видео
         video_info = get_video_info(youtube_url)
         
         self.update_state(
             state='PROGRESS',
-            meta={'status': 'SRT файл создан успешно', 'progress': 100}
+            meta={'status': 'JSON файл создан успешно', 'progress': 100}
         )
         
         return {
             'status': 'completed',
             'progress': 100,
-            'message': 'SRT файл успешно создан',
-            'file_path': srt_path,
-            'file_name': srt_file,
+            'message': 'JSON файл успешно создан',
+            'file_path': json_path,
+            'file_name': json_file,
             'file_size': file_size,
             'youtube_id': youtube_id,
             'title': video_info['title'],
@@ -938,12 +924,12 @@ def create_srt_task(self, youtube_url: str, model_size: str = "medium"):
         
     except Exception as e:
         error_message = str(e)
-        print(f"Ошибка создания SRT: {error_message}")
+        print(f"Ошибка создания JSON: {error_message}")
         
         self.update_state(
             state='FAILURE',
             meta={
-                'status': 'Ошибка создания SRT',
+                'status': 'Ошибка создания JSON',
                 'error': error_message,
                 'exc_type': type(e).__name__
             }

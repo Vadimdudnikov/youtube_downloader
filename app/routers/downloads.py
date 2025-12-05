@@ -226,7 +226,7 @@ async def update_ytdlp():
 
 @router.post("/srt", response_model=SRTResponse)
 async def create_srt(request: SRTRequest):
-    """Создать SRT файл (субтитры) для видео с YouTube"""
+    """Создать JSON файл с субтитрами для видео с YouTube"""
     try:
         # Валидация размера модели
         valid_models = ["tiny", "base", "small", "medium", "large"]
@@ -246,7 +246,7 @@ async def create_srt(request: SRTRequest):
             task_id=task.id,
             youtube_url=str(request.youtube_url),
             status="pending",
-            message="Задача создания SRT файла создана"
+            message="Задача создания JSON файла создана"
         )
     except HTTPException:
         raise
@@ -256,7 +256,7 @@ async def create_srt(request: SRTRequest):
 
 @router.get("/srt/status/{task_id}")
 async def get_srt_status(task_id: str):
-    """Получить статус создания SRT файла по task_id"""
+    """Получить статус создания JSON файла по task_id"""
     try:
         task = create_srt_task.AsyncResult(task_id)
         
