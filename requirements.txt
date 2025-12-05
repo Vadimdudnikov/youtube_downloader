@@ -14,6 +14,5 @@ redis==5.0.1
 
 requests==2.31.0
 
-# WhisperX (стабильная версия, совместима с pyannote.audio 2.1.1)
-whisperx
-omegaconf==2.3.0
+# faster-whisper для транскрибации (быстрее и стабильнее чем WhisperX)
+faster-whisper>=1.0.0
