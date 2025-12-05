@@ -1,29 +1,25 @@
-fastapi==0.104.1
-uvicorn[standard]==0.24.0
+# Celery и Redis для асинхронных задач
+celery>=5.3.0
+redis>=4.5.0
+flower>=2.0.0
 
-pydantic==2.5.0
-pydantic-settings==2.1.0
-python-multipart==0.0.6
+# FastAPI и веб-сервер
+fastapi>=0.104.0
+uvicorn>=0.24.0
+pydantic>=2.5.0
+pydantic-settings>=2.1.0
+python-multipart
 
-aiofiles==23.2.1
-httpx==0.25.2
-aiohttp==3.9.1
+# HTTP клиенты
+requests>=2.31.0
 
-celery==5.3.4
-redis==5.0.1
-
-requests==2.31.0
-
-# whisperx для транскрибации с поддержкой word-level timestamps и диаризации
-whisperx>=3.1.0
-
-# PyTorch для whisperx
-torch>=2.0.0
-torchaudio>=2.0.0
-
-# pydub для работы с аудио файлами (для разбиения больших файлов)
+# WhisperX для транскрипции
+whisperx==3.4.3
 pydub>=0.25.1
-# Для использования GPU установите PyTorch с поддержкой CUDA:
-# pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu118
-# или для CUDA 11.8: pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu118
-# или для CUDA 12.1: pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu121
+
+# PyTorch для WhisperX (CUDA 12.4)
+# Установка: pip install torch torchaudio torchvision --extra-index-url https://download.pytorch.org/whl/cu124
+torch==2.6.0+cu124
+torchaudio==2.6.0+cu124
+torchvision==0.21.0+cu124
+--extra-index-url https://download.pytorch.org/whl/cu124
