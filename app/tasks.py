@@ -388,19 +388,15 @@ def create_srt_task(self, youtube_url: str, model_size: str = "medium"):
         # Создаем временную директорию для вывода WhisperX
         temp_dir = tempfile.mkdtemp()
         try:
-            # Определяем путь к whisperx (используем python -m whisperx)
-            whisperx_cmd = [sys.executable, "-m", "whisperx"]
-            
-            # Формируем команду для WhisperX
-            cmd = whisperx_cmd + [
+            cmd = [
+                sys.executable, "-m", "whisperx",
                 audio_path,
                 "--model", model_size,
                 "--device", device,
                 "--output_dir", temp_dir,
-                "--output_format", "json",
-                "--segment_resolution", "sentence"  # Разбиваем по предложениям
+                "--output_format", "json"
             ]
-            
+
             # Добавляем compute_type если нужно
             if compute_type:
                 cmd.extend(["--compute_type", compute_type])
