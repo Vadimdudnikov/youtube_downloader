@@ -16,3 +16,5 @@ requests==2.31.0
 
 # faster-whisper для транскрибации (быстрее и стабильнее чем WhisperX)
 faster-whisper>=1.0.0
+libcudnn9 
+libcudnn9-dev
