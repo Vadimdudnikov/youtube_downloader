@@ -14,14 +14,22 @@ redis==5.0.1
 
 requests==2.31.0
 
-# 🔥 WhisperX (нормальная стабильная версия)
+# WhisperX stack
 whisperx==3.4.3
-
-# 🔥 ОБЯЗАТЕЛЬНО: подходящий omegaconf
 omegaconf==2.3.0
 
-# 🔥 PyTorch + CUDA 12.4 (совместимо с WhisperX 3.4.3)
-torch==2.6.0+cu124
-torchaudio==2.6.0+cu124
-torchvision==0.21.0+cu124
---extra-index-url https://download.pytorch.org/whl/cu124
+# PyTorch GPU (CUDA 11.8)
+torch==2.1.0
+torchaudio==2.1.0
+torchvision==0.16.0
+
+# Faster Whisper backend
+ctranslate2==3.21.0
+faster-whisper==0.10.0
+
+# Utils
+numpy==1.26.4
+
+# OPTIONAL: speaker diarization
+pyannote.audio==2.1.1
+transformers==4.35.2
