@@ -5,12 +5,12 @@ import sys
 import re
 import copy
 import json
-import tempfile
 import shutil
 from celery import current_task
 from app.celery_app import celery_app
 from app.proxy_manager import proxy_manager
 from app.config import settings
+import whisperx
 import torch
 
 import warnings
@@ -39,6 +39,8 @@ warnings.filterwarnings("ignore", module="speechbrain")
 # HF transformers
 warnings.filterwarnings("ignore", module="transformers")
 
+# Глобальный кэш для моделей WhisperX (чтобы не загружать каждый раз)
+_whisper_models_cache = {}
 
 # Настройка для совместимости с PyTorch 2.6+
 # Патчим torch.load глобально для работы с WhisperX и его зависимостями
@@ -359,11 +361,17 @@ def download_with_retry(youtube_url: str, output_path: str, audio_only: bool = F
 
 
 def check_and_update_ytdlp():
-    """Проверяем и обновляем yt-dlp до nightly-версии"""
+    """Проверяем и обновляем yt-dlp до nightly-версии с GitHub"""
     try:
         # Проверяем текущую версию
-        result = subprocess.run([sys.executable, '-m', 'yt_dlp', '--version'], 
-                              capture_output=True, text=True, timeout=30)
+        ytdlp_path = get_ytdlp_path()
+        if isinstance(ytdlp_path, list):
+            # Используем через python модуль
+            result = subprocess.run([sys.executable, '-m', 'yt_dlp', '--version'], 
+                                  capture_output=True, text=True, timeout=30)
+        else:
+            result = subprocess.run([ytdlp_path, '--version'], 
+                                  capture_output=True, text=True, timeout=30)
         
         if result.returncode == 0:
             current_version = result.stdout.strip()
@@ -371,56 +379,84 @@ def check_and_update_ytdlp():
         else:
             print(f"Предупреждение: не удалось проверить версию yt-dlp: {result.stderr}")
         
-        # Проверяем наличие git
-        git_check = subprocess.run(['git', '--version'], 
-                                 capture_output=True, text=True, timeout=5)
-        has_git = git_check.returncode == 0
+        # Скачиваем nightly-версию с GitHub
+        print("Скачиваем nightly-версию yt-dlp с GitHub...")
         
-        if has_git:
-            # Обновляем до nightly-версии из git репозитория (самая свежая версия)
-            print("Обновляем yt-dlp до nightly-версии из git репозитория...")
-            update_result = subprocess.run(
-                [sys.executable, '-m', 'pip', 'install', '-U', '--no-deps', 
-                 'git+https://github.com/yt-dlp/yt-dlp.git'],
+        # Создаем временный файл для скачивания
+        import tempfile
+        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.tmp')
+        temp_file.close()
+        
+        try:
+            # Скачиваем через curl
+            download_result = subprocess.run(
+                ['curl', '-L', 
+                 'https://github.com/yt-dlp/yt-dlp-nightly-builds/releases/latest/download/yt-dlp',
+                 '-o', temp_file.name],
                 capture_output=True, text=True, timeout=120
             )
             
-            if update_result.returncode == 0:
-                print("✅ yt-dlp обновлён до nightly-версии из git успешно")
-                # Проверяем новую версию
+            if download_result.returncode != 0:
+                raise Exception(f"Ошибка скачивания yt-dlp: {download_result.stderr}")
+            
+            print("✅ yt-dlp скачан успешно")
+            
+            # Определяем пути для установки
+            venv_bin = os.path.dirname(sys.executable)
+            venv_ytdlp = os.path.join(venv_bin, 'yt-dlp')
+            system_ytdlp = '/usr/local/bin/yt-dlp'
+            
+            # Копируем в /usr/local/bin/yt-dlp
+            print(f"Копируем yt-dlp в {system_ytdlp}...")
+            try:
+                # Создаем директорию если её нет
+                os.makedirs(os.path.dirname(system_ytdlp), exist_ok=True)
+                shutil.copy2(temp_file.name, system_ytdlp)
+                os.chmod(system_ytdlp, 0o755)  # chmod +x
+                print(f"✅ yt-dlp скопирован в {system_ytdlp}")
+            except PermissionError:
+                print(f"⚠️  Нет прав для записи в {system_ytdlp}, пропускаем")
+            except Exception as e:
+                print(f"⚠️  Ошибка копирования в {system_ytdlp}: {e}")
+            
+            # Копируем в venv/bin/yt-dlp
+            print(f"Копируем yt-dlp в {venv_ytdlp}...")
+            try:
+                shutil.copy2(temp_file.name, venv_ytdlp)
+                os.chmod(venv_ytdlp, 0o755)  # chmod +x
+                print(f"✅ yt-dlp скопирован в {venv_ytdlp}")
+            except Exception as e:
+                print(f"⚠️  Ошибка копирования в {venv_ytdlp}: {e}")
+            
+            # Проверяем новую версию
+            if os.path.exists(venv_ytdlp):
+                new_result = subprocess.run([venv_ytdlp, '--version'], 
+                                         capture_output=True, text=True, timeout=30)
+            elif os.path.exists(system_ytdlp):
+                new_result = subprocess.run([system_ytdlp, '--version'], 
+                                         capture_output=True, text=True, timeout=30)
+            else:
                 new_result = subprocess.run([sys.executable, '-m', 'yt_dlp', '--version'], 
                                          capture_output=True, text=True, timeout=30)
-                if new_result.returncode == 0:
-                    new_version = new_result.stdout.strip()
-                    print(f"Новая версия yt-dlp (nightly): {new_version}")
-                return
-            else:
-                print(f"⚠️  Ошибка обновления yt-dlp из git: {update_result.stderr}")
-        else:
-            print("⚠️  Git не найден, используем альтернативный способ обновления")
-        
-        # Альтернативный способ - через pre-release (если git недоступен или не сработал)
-        print("Пробуем альтернативный способ обновления (pre-release)...")
-        alt_update = subprocess.run(
-            [sys.executable, '-m', 'pip', 'install', '-U', '--pre', 'yt-dlp'],
-            capture_output=True, text=True, timeout=120
-        )
-        if alt_update.returncode == 0:
-            print("✅ yt-dlp обновлён до pre-release версии")
-            new_result = subprocess.run([sys.executable, '-m', 'yt_dlp', '--version'], 
-                                     capture_output=True, text=True, timeout=30)
+            
             if new_result.returncode == 0:
                 new_version = new_result.stdout.strip()
-                print(f"Новая версия yt-dlp (pre-release): {new_version}")
-        else:
-            print(f"❌ Не удалось обновить yt-dlp: {alt_update.stderr}")
-            
-    except subprocess.TimeoutExpired:
-        print("⚠️  Таймаут при обновлении yt-dlp")
+                print(f"✅ Новая версия yt-dlp (nightly): {new_version}")
+            else:
+                print(f"⚠️  Не удалось проверить новую версию: {new_result.stderr}")
+                
+        finally:
+            # Удаляем временный файл
+            try:
+                os.unlink(temp_file.name)
+            except:
+                pass
+                
     except FileNotFoundError:
-        # Git не установлен
-        print("⚠️  Git не найден, пробуем обновить через pre-release...")
+        # curl не найден
+        print("⚠️  curl не найден, пробуем альтернативный способ обновления...")
         try:
+            # Альтернативный способ - через pip pre-release
             alt_update = subprocess.run(
                 [sys.executable, '-m', 'pip', 'install', '-U', '--pre', 'yt-dlp'],
                 capture_output=True, text=True, timeout=120
@@ -429,6 +465,8 @@ def check_and_update_ytdlp():
                 print("✅ yt-dlp обновлён до pre-release версии")
         except Exception as e:
             print(f"❌ Ошибка при обновлении yt-dlp: {e}")
+    except subprocess.TimeoutExpired:
+        print("⚠️  Таймаут при обновлении yt-dlp")
     except Exception as e:
         print(f"❌ Ошибка при обновлении yt-dlp: {e}")
 
@@ -867,116 +905,87 @@ def create_srt_task(self, youtube_url: str, model_size: str = "medium"):
         else:
             print(f"Используем существующий аудио файл: {audio_file}")
         
+        # Загружаем модель WhisperX
+        self.update_state(
+            state='PROGRESS',
+            meta={'status': f'Загружаем модель WhisperX ({model_size})...', 'progress': 20}
+        )
+        
         # Определяем устройство (GPU или CPU)
         device = "cuda" if torch.cuda.is_available() else "cpu"
+        compute_type = "float16" if device == "cuda" else "int8"
         
         if device == "cuda":
             print(f"Используем GPU: {torch.cuda.get_device_name(0)}")
             print(f"CUDA версия: {torch.version.cuda}")
+            print(f"Compute type: {compute_type} (FP16)")
+            # Оптимизируем для GPU
+            torch.backends.cudnn.benchmark = True
         else:
             print("GPU не доступен, используем CPU")
+            print(f"Compute type: {compute_type} (int8)")
         
-        # Распознаем речь с WhisperX через командную строку
+        # Кэшируем модель WhisperX (загружаем только один раз)
+        cache_key = f"{model_size}_{device}_{compute_type}"
+        if cache_key not in _whisper_models_cache:
+            print(f"Загружаем модель WhisperX: {model_size} на устройстве: {device} (первая загрузка, будет кэширована)")
+            self.update_state(
+                state='PROGRESS',
+                meta={'status': f'Загружаем модель WhisperX ({model_size})...', 'progress': 20}
+            )
+            # Загружаем модель WhisperX с оптимизацией
+            # torch.load уже запатчен глобально для совместимости с PyTorch 2.6+
+            model = whisperx.load_model(
+                model_size, 
+                device=device, 
+                compute_type=compute_type,
+                language=None  # Автоопределение языка
+            )
+            
+            _whisper_models_cache[cache_key] = model
+            print(f"✅ Модель WhisperX загружена и закэширована")
+        else:
+            print(f"✅ Используем закэшированную модель WhisperX: {model_size} на {device}")
+            model = _whisper_models_cache[cache_key]
+        
+        # Распознаем речь
         self.update_state(
             state='PROGRESS',
             meta={'status': 'Распознаем речь...', 'progress': 40}
         )
         
         print(f"Начинаем распознавание речи из файла: {audio_path}")
-        print("Начинаем транскрибацию с WhisperX через CLI...")
         
-        # Создаем временную директорию для вывода WhisperX
-        temp_dir = tempfile.mkdtemp()
-        try:
-            # Определяем путь к whisperx (может быть в venv или системный)
-            # WhisperX обычно устанавливается как Python модуль, используем python -m whisperx
-            whisperx_cmd = [sys.executable, "-m", "whisperx"]
-            
-            # Формируем команду для WhisperX
-            cmd = whisperx_cmd + [
-                audio_path,
-                "--model", model_size,
-                "--device", device,
-                "--output_dir", temp_dir,
-                "--output_format", "json"
-            ]
-            
-            print(f"Выполняем команду: {' '.join(cmd)}")
-            
-            # Запускаем WhisperX
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                check=False
-            )
-            
-            if result.returncode != 0:
-                error_msg = result.stderr or result.stdout
-                print(f"Ошибка WhisperX: {error_msg}")
-                raise Exception(f"Ошибка транскрибации WhisperX: {error_msg}")
-            
-            print(f"WhisperX завершился успешно")
-            print(f"Вывод: {result.stdout[:500]}")  # Первые 500 символов
-            
-            # Ищем созданный JSON файл
-            # WhisperX создает файл с именем как у аудио файла, но с расширением .json
-            audio_basename = os.path.splitext(os.path.basename(audio_path))[0]
-            whisperx_json = os.path.join(temp_dir, f"{audio_basename}.json")
-            
-            if not os.path.exists(whisperx_json):
-                # Пробуем найти любой JSON файл в директории
-                json_files = [f for f in os.listdir(temp_dir) if f.endswith('.json')]
-                if json_files:
-                    whisperx_json = os.path.join(temp_dir, json_files[0])
-                else:
-                    raise Exception(f"JSON файл не найден в {temp_dir}")
-            
-            # Читаем результат из JSON файла
-            with open(whisperx_json, 'r', encoding='utf-8') as f:
-                whisperx_result = json.load(f)
-            
-            print(f"JSON файл прочитан: {whisperx_json}")
-            
-            # Извлекаем segments из результата WhisperX
-            # WhisperX может вернуть либо список segments, либо объект с ключом "segments"
-            segments_list = []
-            if isinstance(whisperx_result, list):
-                # Если это список segments
-                segments_list = whisperx_result
-            elif isinstance(whisperx_result, dict):
-                # Если это объект с ключом "segments"
-                if 'segments' in whisperx_result:
-                    segments_list = whisperx_result['segments']
-                else:
-                    # Если segments на верхнем уровне
-                    segments_list = [whisperx_result] if 'start' in whisperx_result else []
-            
-            # Преобразуем segments в нужный формат
-            formatted_segments = []
-            for segment in segments_list:
-                formatted_segments.append({
+        # Распознаем речь с WhisperX
+        print("Начинаем транскрибацию с WhisperX...")
+        result = model.transcribe(
+            audio_path,
+            batch_size=16,  # Размер батча для обработки
+            language=None,  # Автоопределение языка
+            task="transcribe"
+        )
+        
+        print(f"Транскрибация завершена. Язык: {result.get('language', 'unknown')}")
+        
+        # WhisperX возвращает результат с segments в нужном формате
+        # Извлекаем segments и конвертируем в нужный формат
+        segments_list = []
+        if 'segments' in result:
+            for segment in result['segments']:
+                segments_list.append({
                     'start': segment.get('start', 0.0),
                     'end': segment.get('end', 0.0),
                     'text': segment.get('text', '').strip()
                 })
-            
-            print(f"Транскрибация завершена. Найдено сегментов: {len(formatted_segments)}")
-            
-            # Генерируем JSON файл в нужном формате
-            self.update_state(
-                state='PROGRESS',
-                meta={'status': 'Генерируем JSON файл...', 'progress': 90}
-            )
-            
-            print(f"Генерируем JSON файл: {json_path}")
-            generate_json_from_segments(formatted_segments, json_path)
-            
-        finally:
-            # Удаляем временную директорию
-            if os.path.exists(temp_dir):
-                shutil.rmtree(temp_dir)
-                print(f"Временная директория удалена: {temp_dir}")
+        
+        # Генерируем JSON файл
+        self.update_state(
+            state='PROGRESS',
+            meta={'status': 'Генерируем JSON файл...', 'progress': 90}
+        )
+        
+        print(f"Генерируем JSON файл: {json_path}")
+        generate_json_from_segments(segments_list, json_path)
         
         file_size = os.path.getsize(json_path)
         
