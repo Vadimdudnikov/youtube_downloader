@@ -222,16 +222,24 @@ def transcribe_audio_task(self, audio_path: str, task_id: str = None, model_size
         
         # Если указан task_id, сохраняем результат в JSON файл
         if task_id:
-            # Убеждаемся, что базовая директория существует
-            os.makedirs(settings.tmp_dir, exist_ok=True)
-            task_dir = os.path.join(settings.tmp_dir, task_id)
-            os.makedirs(task_dir, exist_ok=True)
+            # Сохраняем в папку srt (для совместимости с API)
+            video_dir, srt_dir = ensure_directories()
+            json_file = f"{task_id}.json"
+            json_path = os.path.join(srt_dir, json_file)
             
-            original_json_path = os.path.join(task_dir, 'original.json')
-            with open(original_json_path, 'w', encoding='utf-8') as f:
-                json.dump(transcription_result, f, ensure_ascii=False, indent=4)
+            # Формируем JSON данные из сегментов
+            json_data = []
+            for segment in segments:
+                json_data.append({
+                    'start': segment.get('start', 0),
+                    'end': segment.get('end', 0),
+                    'text': segment.get('text', '').strip()
+                })
             
-            print(f"✅ Результат сохранен в: {original_json_path}")
+            with open(json_path, 'w', encoding='utf-8') as f:
+                json.dump(json_data, f, ensure_ascii=False, indent=4)
+            
+            print(f"✅ Результат сохранен в: {json_path}")
         
         # Обновляем статус
         self.update_state(
@@ -246,7 +254,8 @@ def transcribe_audio_task(self, audio_path: str, task_id: str = None, model_size
             'status': 'success',
             'segments': segments,
             'message': message,
-            'segments_count': len(segments)
+            'segments_count': len(segments),
+            'youtube_id': task_id if task_id else None
         }
         
         print(f"✅ Транскрипция завершена: {len(segments)} сегментов")

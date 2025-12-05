@@ -3,7 +3,8 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, HttpUrl
 import os
 
-from app.tasks import download_video_task
+from app.tasks import download_video_task, transcribe_audio_task, extract_youtube_id
+from typing import Optional
 
 router = APIRouter()
 
@@ -14,6 +15,18 @@ class DownloadRequest(BaseModel):
 
 
 class DownloadResponse(BaseModel):
+    task_id: str
+    youtube_url: str
+    status: str
+    message: str
+
+
+class SRTRequest(BaseModel):
+    youtube_url: HttpUrl
+    model_size: Optional[str] = "medium"  # tiny, base, small, medium, large
+
+
+class SRTResponse(BaseModel):
     task_id: str
     youtube_url: str
     status: str
@@ -159,7 +172,7 @@ async def list_downloads():
                     files.append({
                         "filename": filename,
                         "size": file_size,
-                        "type": "srt",
+                        "type": "json" if filename.endswith('.json') else "srt",
                         "download_url": f"/api/v1/download/file/{filename}"
                     })
         
@@ -169,5 +182,149 @@ async def list_downloads():
         }
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Ошибка получения списка: {str(e)}")
+
+
+@router.post("/srt", response_model=SRTResponse)
+async def create_srt(request: SRTRequest):
+    """Создать JSON файл с субтитрами для видео с YouTube"""
+    try:
+        # Валидация размера модели
+        valid_models = ["tiny", "base", "small", "medium", "large"]
+        if request.model_size not in valid_models:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Неверный размер модели. Доступные: {', '.join(valid_models)}"
+            )
+        
+        # Извлекаем YouTube ID
+        youtube_id = extract_youtube_id(str(request.youtube_url))
+        
+        # Проверяем наличие аудио файла
+        video_dir = os.path.join("assets", "video")
+        audio_file = f"{youtube_id}.mp3"
+        audio_path = os.path.join(video_dir, audio_file)
+        
+        # Если аудио нет, сначала скачиваем его
+        if not os.path.exists(audio_path):
+            # Запускаем задачу загрузки аудио
+            download_task = download_video_task.delay(str(request.youtube_url), True)
+            
+            # Ждем завершения загрузки (можно сделать асинхронно, но для простоты ждем)
+            # В реальном приложении лучше использовать цепочку задач Celery
+            import time
+            timeout = 300  # 5 минут
+            elapsed = 0
+            while elapsed < timeout:
+                if download_task.ready():
+                    result = download_task.result
+                    if isinstance(result, dict) and result.get('status') == 'failed':
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"Ошибка загрузки аудио: {result.get('error', 'Неизвестная ошибка')}"
+                        )
+                    break
+                time.sleep(2)
+                elapsed += 2
+            
+            if not download_task.ready():
+                raise HTTPException(status_code=408, detail="Таймаут загрузки аудио")
+            
+            # Проверяем, что файл появился
+            if not os.path.exists(audio_path):
+                raise HTTPException(status_code=500, detail="Аудио файл не был создан после загрузки")
+        
+        # Запускаем задачу транскрипции
+        task = transcribe_audio_task.delay(
+            audio_path=audio_path,
+            task_id=youtube_id,
+            model_size=request.model_size
+        )
+        
+        return SRTResponse(
+            task_id=task.id,
+            youtube_url=str(request.youtube_url),
+            status="pending",
+            message="Задача создания JSON файла создана"
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Ошибка создания задачи: {str(e)}")
+
+
+@router.get("/srt/status/{task_id}")
+async def get_srt_status(task_id: str):
+    """Получить статус создания JSON файла по task_id"""
+    try:
+        task = transcribe_audio_task.AsyncResult(task_id)
+        
+        if task.state == 'PENDING':
+            response = {
+                'task_id': task_id,
+                'state': task.state,
+                'status': 'Ожидание...',
+                'progress': 0
+            }
+        elif task.state == 'PROGRESS':
+            # Проверяем, что task.info является словарем
+            if isinstance(task.info, dict):
+                info = task.info
+            else:
+                info = {}
+            response = {
+                'task_id': task_id,
+                'state': task.state,
+                'status': info.get('status', 'Обрабатываем...'),
+                'progress': info.get('progress', 0)
+            }
+        elif task.state == 'SUCCESS':
+            # Проверяем, что task.result является словарем
+            if isinstance(task.result, dict):
+                result = task.result
+            else:
+                result = {}
+            
+            # Получаем YouTube ID из task_id или из результата
+            youtube_id = result.get('youtube_id', task_id)
+            json_file = f"{youtube_id}.json"
+            json_path = os.path.join("assets", "srt", json_file)
+            
+            # Если файл существует, добавляем информацию о нем
+            file_size = None
+            if os.path.exists(json_path):
+                file_size = os.path.getsize(json_path)
+            
+            response = {
+                'task_id': task_id,
+                'state': task.state,
+                'status': 'completed',
+                'progress': 100,
+                'message': result.get('message'),
+                'file_name': json_file if os.path.exists(json_path) else None,
+                'file_size': file_size,
+                'segments_count': result.get('segments_count'),
+                'download_url': f"/api/v1/download/file/{json_file}" if os.path.exists(json_path) else None
+            }
+        else:  # FAILURE
+            # Проверяем, что task.info является словарем
+            if isinstance(task.info, dict):
+                error_info = task.info
+            else:
+                # Если task.info это исключение, извлекаем информацию из него
+                error_info = {
+                    'error': str(task.info) if task.info else 'Неизвестная ошибка',
+                    'exc_type': type(task.info).__name__ if task.info else 'Unknown'
+                }
+            response = {
+                'task_id': task_id,
+                'state': task.state,
+                'status': 'error',
+                'error': error_info.get('error', 'Неизвестная ошибка'),
+                'exc_type': error_info.get('exc_type', 'Unknown')
+            }
+        
+        return response
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Ошибка получения статуса: {str(e)}")
 
 
