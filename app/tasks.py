@@ -228,7 +228,7 @@ def download_with_retry(ydl_opts: dict, youtube_url: str, use_cookies: bool = Fa
 
 
 def check_and_update_ytdlp():
-    """Проверяем и обновляем yt-dlp если необходимо"""
+    """Проверяем и обновляем yt-dlp до nightly-версии"""
     try:
         # Проверяем текущую версию
         result = subprocess.run([sys.executable, '-m', 'yt_dlp', '--version'], 
@@ -237,30 +237,69 @@ def check_and_update_ytdlp():
         if result.returncode == 0:
             current_version = result.stdout.strip()
             print(f"Текущая версия yt-dlp: {current_version}")
-            
-            # Пытаемся обновить
-            print("Проверяем обновления yt-dlp...")
-            update_result = subprocess.run([sys.executable, '-m', 'yt_dlp', '-U'], 
-                                         capture_output=True, text=True, timeout=60)
+        else:
+            print(f"Предупреждение: не удалось проверить версию yt-dlp: {result.stderr}")
+        
+        # Проверяем наличие git
+        git_check = subprocess.run(['git', '--version'], 
+                                 capture_output=True, text=True, timeout=5)
+        has_git = git_check.returncode == 0
+        
+        if has_git:
+            # Обновляем до nightly-версии из git репозитория (самая свежая версия)
+            print("Обновляем yt-dlp до nightly-версии из git репозитория...")
+            update_result = subprocess.run(
+                [sys.executable, '-m', 'pip', 'install', '-U', '--no-deps', 
+                 'git+https://github.com/yt-dlp/yt-dlp.git'],
+                capture_output=True, text=True, timeout=120
+            )
             
             if update_result.returncode == 0:
-                print("yt-dlp обновлён успешно")
+                print("✅ yt-dlp обновлён до nightly-версии из git успешно")
                 # Проверяем новую версию
                 new_result = subprocess.run([sys.executable, '-m', 'yt_dlp', '--version'], 
                                          capture_output=True, text=True, timeout=30)
                 if new_result.returncode == 0:
                     new_version = new_result.stdout.strip()
-                    print(f"Новая версия yt-dlp: {new_version}")
+                    print(f"Новая версия yt-dlp (nightly): {new_version}")
+                return
             else:
-                print(f"Ошибка обновления yt-dlp: {update_result.stderr}")
-                
+                print(f"⚠️  Ошибка обновления yt-dlp из git: {update_result.stderr}")
         else:
-            print(f"Ошибка проверки версии yt-dlp: {result.stderr}")
+            print("⚠️  Git не найден, используем альтернативный способ обновления")
+        
+        # Альтернативный способ - через pre-release (если git недоступен или не сработал)
+        print("Пробуем альтернативный способ обновления (pre-release)...")
+        alt_update = subprocess.run(
+            [sys.executable, '-m', 'pip', 'install', '-U', '--pre', 'yt-dlp'],
+            capture_output=True, text=True, timeout=120
+        )
+        if alt_update.returncode == 0:
+            print("✅ yt-dlp обновлён до pre-release версии")
+            new_result = subprocess.run([sys.executable, '-m', 'yt_dlp', '--version'], 
+                                     capture_output=True, text=True, timeout=30)
+            if new_result.returncode == 0:
+                new_version = new_result.stdout.strip()
+                print(f"Новая версия yt-dlp (pre-release): {new_version}")
+        else:
+            print(f"❌ Не удалось обновить yt-dlp: {alt_update.stderr}")
             
     except subprocess.TimeoutExpired:
-        print("Таймаут при проверке/обновлении yt-dlp")
+        print("⚠️  Таймаут при обновлении yt-dlp")
+    except FileNotFoundError:
+        # Git не установлен
+        print("⚠️  Git не найден, пробуем обновить через pre-release...")
+        try:
+            alt_update = subprocess.run(
+                [sys.executable, '-m', 'pip', 'install', '-U', '--pre', 'yt-dlp'],
+                capture_output=True, text=True, timeout=120
+            )
+            if alt_update.returncode == 0:
+                print("✅ yt-dlp обновлён до pre-release версии")
+        except Exception as e:
+            print(f"❌ Ошибка при обновлении yt-dlp: {e}")
     except Exception as e:
-        print(f"Ошибка при проверке yt-dlp: {e}")
+        print(f"❌ Ошибка при обновлении yt-dlp: {e}")
 
 
 @celery_app.task(bind=True)
