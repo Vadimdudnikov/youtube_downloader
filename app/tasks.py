@@ -55,13 +55,18 @@ def _patched_torch_load(*args, **kwargs):
 # Применяем патч глобально
 torch.load = _patched_torch_load
 
-# Также пытаемся добавить безопасные глобалы для omegaconf
+# Явно разрешаем загрузку Pyannote-чекпоинтов
+# Это необходимо для работы WhisperX с PyTorch 2.6+
 try:
-    from omegaconf import ListConfig
-    from omegaconf.base import ContainerMetadata
-    torch.serialization.add_safe_globals([ListConfig, ContainerMetadata])
-except ImportError:
-    pass
+    import omegaconf
+    from omegaconf.listconfig import ListConfig
+    torch.serialization.add_safe_globals([omegaconf.listconfig.ListConfig])
+    print("✅ omegaconf.ListConfig добавлен в безопасные глобалы PyTorch")
+except ImportError as e:
+    print(f"⚠️ Не удалось добавить omegaconf.ListConfig в безопасные глобалы PyTorch: {e}")
+    print("   Возможны ошибки при загрузке моделей, сохраненных с omegaconf.")
+except Exception as e:
+    print(f"⚠️ Ошибка при добавлении omegaconf.ListConfig: {e}")
 
 
 
@@ -170,9 +175,6 @@ def download_video_task(self, youtube_url: str, audio_only: bool = False):
             file_size = os.path.getsize(mp3_path)
             print(f"Файл уже существует локально: {mp3_file}")
             
-            # Получаем информацию о видео для кэшированного файла
-            video_info = get_video_info(youtube_url)
-            
             return {
                 'status': 'completed',
                 'progress': 100,
@@ -180,11 +182,6 @@ def download_video_task(self, youtube_url: str, audio_only: bool = False):
                 'file_path': mp3_path,
                 'file_name': mp3_file,
                 'file_size': file_size,
-                'title': video_info['title'],
-                'duration': video_info['duration'],
-                'uploader': video_info['uploader'],
-                'view_count': video_info['view_count'],
-                'upload_date': video_info['upload_date'],
                 'download_type': 'аудио',
                 'youtube_id': youtube_id,
                 'cached': True
@@ -209,9 +206,6 @@ def download_video_task(self, youtube_url: str, audio_only: bool = False):
         file_size = os.path.getsize(downloaded_path)
         print(f"✅ Аудио успешно загружено: {mp3_file} ({file_size / 1024 / 1024:.2f} МБ)")
         
-        # Получаем информацию о видео
-        video_info = get_video_info(youtube_url)
-        
         self.update_state(
             state='PROGRESS',
             meta={'status': 'Загрузка завершена', 'progress': 100}
@@ -224,11 +218,6 @@ def download_video_task(self, youtube_url: str, audio_only: bool = False):
             'file_path': downloaded_path,
             'file_name': mp3_file,
             'file_size': file_size,
-            'title': video_info['title'],
-            'duration': video_info['duration'],
-            'uploader': video_info['uploader'],
-            'view_count': video_info['view_count'],
-            'upload_date': video_info['upload_date'],
             'download_type': 'аудио',
             'youtube_id': youtube_id,
             'cached': False
