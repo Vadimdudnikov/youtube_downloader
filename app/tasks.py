@@ -845,9 +845,16 @@ def create_srt_task(self, youtube_url: str, model_size: str = "medium"):
                 state='PROGRESS',
                 meta={'status': f'Загружаем модель Whisper ({model_size})...', 'progress': 20}
             )
-            model = whisper.load_model(model_size, device=device)
+            # Загружаем модель с FP16 на GPU для ускорения
+            if device == "cuda":
+                model = whisper.load_model(model_size, device=device, in_memory=True)
+                # Убеждаемся, что модель использует FP16
+                model = model.half()
+                print(f"✅ Модель загружена в FP16 режиме на GPU")
+            else:
+                model = whisper.load_model(model_size, device=device)
+                print(f"✅ Модель загружена на CPU")
             _whisper_models_cache[cache_key] = model
-            print(f"✅ Модель загружена и закэширована")
         else:
             print(f"✅ Используем закэшированную модель Whisper: {model_size} на {device}")
             model = _whisper_models_cache[cache_key]
