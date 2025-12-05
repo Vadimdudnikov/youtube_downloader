@@ -91,12 +91,20 @@ def is_authentication_error(error_message: str) -> bool:
     return any(keyword in error_lower for keyword in auth_keywords)
 
 
-def download_with_retry(ydl_opts: dict, youtube_url: str, use_cookies: bool = False) -> dict:
-    """Загружаем видео с возможностью повторной попытки с куки"""
+def download_with_retry(ydl_opts: dict, youtube_url: str, use_cookies: bool = False, cookies_path: str = None) -> dict:
+    """Загружаем видео с возможностью использования куки"""
     try:
-        if use_cookies and os.path.exists(settings.cookies_file):
-            ydl_opts['cookiefile'] = settings.cookies_file
-            print(f"Повторная попытка с cookies из файла: {settings.cookies_file}")
+        if use_cookies:
+            # Используем переданный путь или путь из настроек
+            cookie_file = cookies_path or settings.cookies_file
+            if not os.path.isabs(cookie_file):
+                cookie_file = os.path.join(os.getcwd(), cookie_file)
+            
+            if os.path.exists(cookie_file):
+                ydl_opts['cookiefile'] = cookie_file
+                print(f"Используем cookies из файла: {cookie_file}")
+            else:
+                print(f"⚠️  Файл cookies не найден: {cookie_file}")
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             # Получаем информацию о видео
@@ -347,29 +355,65 @@ def download_video_task(self, youtube_url: str, audio_only: bool = False):
                 }
             }
         
-        # Куки будут добавлены только при ошибке аутентификации
+        # Проверяем наличие cookies файла
+        cookies_path = settings.cookies_file
+        # Если путь относительный, делаем его абсолютным относительно корня проекта
+        if not os.path.isabs(cookies_path):
+            cookies_path = os.path.join(os.getcwd(), cookies_path)
+        
+        cookies_exist = os.path.exists(cookies_path)
+        if cookies_exist:
+            print(f"✅ Найден файл cookies: {cookies_path}")
+            print(f"   Размер файла: {os.path.getsize(cookies_path)} байт")
+        else:
+            print(f"❌ Файл cookies не найден: {cookies_path}")
+            print(f"   Текущая рабочая директория: {os.getcwd()}")
+            # Пробуем найти файл в корне проекта
+            project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            alt_cookies_path = os.path.join(project_root, "cookies.txt")
+            if os.path.exists(alt_cookies_path):
+                print(f"   Найден альтернативный путь: {alt_cookies_path}")
+                cookies_path = alt_cookies_path
+                cookies_exist = True
         
         # Добавляем прокси если доступен
         if proxy_url:
             ydl_opts['proxy'] = proxy_url
             print(f"Используем прокси: {proxy_url}")
         
-        # Первая попытка загрузки без куки
         download_type = "аудио" if audio_only else "видео"
-        self.update_state(
-            state='PROGRESS', 
-            meta={
-                'status': f'Начинаем загрузку {download_type}...',
-                'progress': 5
-            }
-        )
         
-        result = download_with_retry(ydl_opts, youtube_url, use_cookies=False)
+        # Если cookies файл существует, используем его сразу
+        if cookies_exist:
+            self.update_state(
+                state='PROGRESS', 
+                meta={
+                    'status': f'Начинаем загрузку {download_type} с cookies...',
+                    'progress': 5
+                }
+            )
+            result = download_with_retry(ydl_opts, youtube_url, use_cookies=True, cookies_path=cookies_path)
+        else:
+            # Первая попытка загрузки без куки
+            self.update_state(
+                state='PROGRESS', 
+                meta={
+                    'status': f'Начинаем загрузку {download_type}...',
+                    'progress': 5
+                }
+            )
+            result = download_with_retry(ydl_opts, youtube_url, use_cookies=False)
         
-        # Если первая попытка не удалась и ошибка связана с аутентификацией, пробуем с куки
-        if not result['success'] and is_authentication_error(result['error']):
+        # Если первая попытка не удалась и ошибка связана с аутентификацией, пробуем с куки (если еще не пробовали)
+        if not result['success'] and is_authentication_error(result['error']) and not cookies_exist:
             print(f"Обнаружена ошибка аутентификации: {result['error']}")
             print("Пробуем повторную загрузку с куки...")
+            
+            # Пробуем найти cookies файл еще раз
+            retry_cookies_path = cookies_path
+            if not retry_cookies_path or not os.path.exists(retry_cookies_path):
+                project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                retry_cookies_path = os.path.join(project_root, "cookies.txt")
             
             self.update_state(
                 state='PROGRESS', 
@@ -379,7 +423,7 @@ def download_video_task(self, youtube_url: str, audio_only: bool = False):
                 }
             )
             
-            result = download_with_retry(ydl_opts, youtube_url, use_cookies=True)
+            result = download_with_retry(ydl_opts, youtube_url, use_cookies=True, cookies_path=retry_cookies_path)
         
         # Если обе попытки не удались, поднимаем исключение
         if not result['success']:
