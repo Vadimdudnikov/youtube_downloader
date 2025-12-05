@@ -85,8 +85,8 @@ def get_video_info(youtube_url: str) -> dict:
         rapidapi = RapidAPIService()
         video_id = rapidapi.get_video_id_from_url(youtube_url)
         
-        # Получаем информацию от RapidAPI
-        info = rapidapi.get_info_from_rapidapi(video_id, timeout=30, max_retries=1)
+        # Получаем информацию от RapidAPI с увеличенным таймаутом и несколькими попытками
+        info = rapidapi.get_info_from_rapidapi(video_id, timeout=60, max_retries=3)
         
         return {
             'title': info.get('title', 'Unknown'),
@@ -97,6 +97,7 @@ def get_video_info(youtube_url: str) -> dict:
         }
     except Exception as e:
         print(f"Ошибка получения информации о видео: {e}")
+        # Возвращаем значения по умолчанию, чтобы не блокировать выполнение задачи
         return {
             'title': 'Unknown',
             'duration': 0,
