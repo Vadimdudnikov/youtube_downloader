@@ -259,15 +259,14 @@ class WhisperXService:
         print("Выполняем выравнивание на уровне предложений...")
         align_model, metadata = self._load_align_model(language_code=detected_language)
 
-        # Выравниваем с align_sentences=True
+        # Выравниваем сегменты
         result = whisperx.align(
             result["segments"],
             align_model,
             metadata,
             audio,
             self.device,
-            return_char_alignments=False,
-            align_sentences=True
+            return_char_alignments=False
         )
 
         print("✅ Выравнивание завершено")
