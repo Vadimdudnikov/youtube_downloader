@@ -9,7 +9,7 @@ from celery import current_task
 from app.celery_app import celery_app
 from app.proxy_manager import proxy_manager
 from app.config import settings
-import whisper
+from faster_whisper import WhisperModel
 import torch
 
 # Глобальный кэш для моделей Whisper (чтобы не загружать каждый раз)
@@ -829,34 +829,35 @@ def create_srt_task(self, youtube_url: str, model_size: str = "medium"):
         
         # Определяем устройство (GPU или CPU)
         device = "cuda" if torch.cuda.is_available() else "cpu"
+        compute_type = "float16" if device == "cuda" else "int8"
+        
         if device == "cuda":
             print(f"Используем GPU: {torch.cuda.get_device_name(0)}")
             print(f"CUDA версия: {torch.version.cuda}")
-            # Оптимизируем для GPU
-            torch.backends.cudnn.benchmark = True
+            print(f"Compute type: {compute_type} (FP16)")
         else:
             print("GPU не доступен, используем CPU")
+            print(f"Compute type: {compute_type} (int8)")
         
         # Кэшируем модель Whisper (загружаем только один раз)
-        cache_key = f"{model_size}_{device}"
+        cache_key = f"{model_size}_{device}_{compute_type}"
         if cache_key not in _whisper_models_cache:
-            print(f"Загружаем модель Whisper: {model_size} на устройстве: {device} (первая загрузка, будет кэширована)")
+            print(f"Загружаем модель faster-whisper: {model_size} на устройстве: {device} (первая загрузка, будет кэширована)")
             self.update_state(
                 state='PROGRESS',
                 meta={'status': f'Загружаем модель Whisper ({model_size})...', 'progress': 20}
             )
-            # Загружаем модель с FP16 на GPU для ускорения
-            if device == "cuda":
-                model = whisper.load_model(model_size, device=device, in_memory=True)
-                # Убеждаемся, что модель использует FP16
-                model = model.half()
-                print(f"✅ Модель загружена в FP16 режиме на GPU")
-            else:
-                model = whisper.load_model(model_size, device=device)
-                print(f"✅ Модель загружена на CPU")
+            # Загружаем модель faster-whisper с оптимизацией
+            model = WhisperModel(
+                model_size, 
+                device=device, 
+                compute_type=compute_type,
+                num_workers=1  # Количество потоков для обработки
+            )
             _whisper_models_cache[cache_key] = model
+            print(f"✅ Модель faster-whisper загружена и закэширована")
         else:
-            print(f"✅ Используем закэшированную модель Whisper: {model_size} на {device}")
+            print(f"✅ Используем закэшированную модель faster-whisper: {model_size} на {device}")
             model = _whisper_models_cache[cache_key]
         
         # Распознаем речь
@@ -867,23 +868,40 @@ def create_srt_task(self, youtube_url: str, model_size: str = "medium"):
         
         print(f"Начинаем распознавание речи из файла: {audio_path}")
         
-        # Оптимизированные параметры для распознавания (скорость vs качество)
+        # Оптимизированные параметры для faster-whisper
         transcribe_options = {
-            'verbose': False,
-            'task': 'transcribe',
-            'fp16': device == "cuda",  # Используем fp16 на GPU для ускорения
-            'beam_size': 5,  # Уменьшаем beam_size для ускорения (по умолчанию 5, можно уменьшить до 1 для максимальной скорости)
-            'best_of': 5,  # Уменьшаем best_of для ускорения
-            'temperature': 0,  # Используем greedy decoding для скорости
+            'beam_size': 5,  # Размер луча для поиска
+            'best_of': 5,  # Количество кандидатов
+            'temperature': 0,  # Температура для sampling (0 = greedy)
             'compression_ratio_threshold': 2.4,  # Порог сжатия
-            'logprob_threshold': -1.0,  # Порог вероятности
+            'log_prob_threshold': -1.0,  # Порог вероятности
             'no_speech_threshold': 0.6,  # Порог отсутствия речи
+            'condition_on_previous_text': True,  # Использовать предыдущий текст
+            'initial_prompt': None,  # Начальный промпт
+            'word_timestamps': False,  # Не нужны временные метки слов для SRT
+            'vad_filter': True,  # Фильтр голосовой активности для ускорения
+            'vad_parameters': {
+                'threshold': 0.5,
+                'min_speech_duration_ms': 250,
+                'max_speech_duration_s': float('inf'),
+                'min_silence_duration_ms': 2000,
+            }
         }
         
         # Распознаем речь
-        print("Начинаем транскрибацию...")
-        result = model.transcribe(audio_path, **transcribe_options)
-        print("Транскрибация завершена")
+        print("Начинаем транскрибацию с faster-whisper...")
+        segments, info = model.transcribe(audio_path, **transcribe_options)
+        
+        # Конвертируем segments в формат для generate_srt_from_segments
+        segments_list = []
+        for segment in segments:
+            segments_list.append({
+                'start': segment.start,
+                'end': segment.end,
+                'text': segment.text
+            })
+        
+        print(f"Транскрибация завершена. Язык: {info.language}, вероятность: {info.language_probability:.2f}")
         
         # Генерируем SRT файл
         self.update_state(
@@ -892,7 +910,7 @@ def create_srt_task(self, youtube_url: str, model_size: str = "medium"):
         )
         
         print(f"Генерируем SRT файл: {srt_path}")
-        generate_srt_from_segments(result['segments'], srt_path)
+        generate_srt_from_segments(segments_list, srt_path)
         
         file_size = os.path.getsize(srt_path)
         
