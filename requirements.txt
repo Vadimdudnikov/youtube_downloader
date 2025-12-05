@@ -14,8 +14,8 @@ redis==5.0.1
 
 requests==2.31.0
 
-# WhisperX stack
-whisperx==3.4.3
+# WhisperX (стабильная версия)
+whisperx==3.1.0
 omegaconf==2.3.0
 
 # PyTorch GPU (CUDA 11.8)
@@ -30,6 +30,6 @@ faster-whisper==0.10.0
 # Utils
 numpy==1.26.4
 
-# OPTIONAL: speaker diarization
+# Старая стабильная диаризация (совместима с whisperx 3.1.0)
 pyannote.audio==2.1.1
 transformers==4.35.2
