@@ -317,7 +317,6 @@ def create_srt_task(self, youtube_url: str, model_size: str = "medium"):
             )
             
             file_size = os.path.getsize(json_path)
-            video_info = get_video_info(youtube_url)
             
             return {
                 'status': 'completed',
@@ -327,8 +326,6 @@ def create_srt_task(self, youtube_url: str, model_size: str = "medium"):
                 'file_name': json_file,
                 'file_size': file_size,
                 'youtube_id': youtube_id,
-                'title': video_info['title'],
-                'duration': video_info['duration'],
                 'cached': True
             }
         
@@ -454,9 +451,6 @@ def create_srt_task(self, youtube_url: str, model_size: str = "medium"):
         
         file_size = os.path.getsize(json_path)
         
-        # Получаем информацию о видео
-        video_info = get_video_info(youtube_url)
-        
         self.update_state(
             state='PROGRESS',
             meta={'status': 'JSON файл создан успешно', 'progress': 100}
@@ -470,8 +464,6 @@ def create_srt_task(self, youtube_url: str, model_size: str = "medium"):
             'file_name': json_file,
             'file_size': file_size,
             'youtube_id': youtube_id,
-            'title': video_info['title'],
-            'duration': video_info['duration'],
             'cached': False,
             'audio_cached': audio_exists
         }
