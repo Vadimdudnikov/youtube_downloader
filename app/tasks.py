@@ -898,8 +898,7 @@ def create_srt_task(self, youtube_url: str, model_size: str = "medium"):
                 "--model", model_size,
                 "--device", device,
                 "--output_dir", temp_dir,
-                "--output_format", "json",
-                "--vad", "silero"  # Используем silero VAD
+                "--output_format", "json"
             ]
             
             print(f"Выполняем команду: {' '.join(cmd)}")
