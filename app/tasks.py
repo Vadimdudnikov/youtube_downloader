@@ -377,8 +377,12 @@ def create_srt_task(self, youtube_url: str, model_size: str = "medium"):
         # Создаем временную директорию для вывода WhisperX
         temp_dir = tempfile.mkdtemp()
         try:
+            # Используем wrapper скрипт для применения патчей перед запуском WhisperX
+            wrapper_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "whisperx_wrapper.py")
+            wrapper_script = os.path.abspath(wrapper_script)
+            
             cmd = [
-                sys.executable, "-m", "whisperx",
+                sys.executable, wrapper_script,
                 audio_path,
                 "--model", model_size,
                 "--device", device,
