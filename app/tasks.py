@@ -91,6 +91,41 @@ def is_authentication_error(error_message: str) -> bool:
     return any(keyword in error_lower for keyword in auth_keywords)
 
 
+def validate_cookies_file(cookie_file: str) -> bool:
+    """Проверяет формат файла cookies (Netscape format)"""
+    try:
+        if not os.path.exists(cookie_file):
+            return False
+        
+        with open(cookie_file, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+        
+        valid_lines = 0
+        for line_num, line in enumerate(lines, 1):
+            line = line.strip()
+            # Пропускаем пустые строки и комментарии
+            if not line or line.startswith('#'):
+                continue
+            
+            # Формат Netscape: domain, flag, path, secure, expiration, name, value
+            # Все поля разделены табуляцией
+            parts = line.split('\t')
+            if len(parts) >= 7:
+                valid_lines += 1
+            elif len(parts) > 0:
+                print(f"⚠️  Строка {line_num} в cookies файле имеет неправильный формат (ожидается 7 полей, найдено {len(parts)}): {line[:50]}...")
+        
+        if valid_lines == 0:
+            print(f"❌ Файл cookies не содержит валидных записей в формате Netscape")
+            return False
+        
+        print(f"✅ Файл cookies содержит {valid_lines} валидных записей")
+        return True
+    except Exception as e:
+        print(f"❌ Ошибка при проверке файла cookies: {e}")
+        return False
+
+
 def download_with_retry(ydl_opts: dict, youtube_url: str, use_cookies: bool = False, cookies_path: str = None) -> dict:
     """Загружаем видео с возможностью использования куки"""
     try:
@@ -101,8 +136,20 @@ def download_with_retry(ydl_opts: dict, youtube_url: str, use_cookies: bool = Fa
                 cookie_file = os.path.join(os.getcwd(), cookie_file)
             
             if os.path.exists(cookie_file):
+                # Проверяем формат файла
+                is_valid = validate_cookies_file(cookie_file)
                 ydl_opts['cookiefile'] = cookie_file
-                print(f"Используем cookies из файла: {cookie_file}")
+                
+                if is_valid:
+                    print(f"✅ Используем cookies из файла: {cookie_file}")
+                else:
+                    print(f"⚠️  ВНИМАНИЕ: Файл cookies имеет неправильный формат!")
+                    print(f"   Файл будет использован, но некоторые записи могут быть пропущены.")
+                    print(f"   Для правильного формата используйте расширение браузера:")
+                    print(f"   - Chrome/Edge: 'Get cookies.txt LOCALLY' или 'cookies.txt'")
+                    print(f"   - Firefox: 'cookies.txt'")
+                    print(f"   Формат Netscape: domain\\tflag\\tpath\\tsecure\\texpiration\\tname\\tvalue")
+                    print(f"   Пример: .youtube.com\\tTRUE\\t/\\tFALSE\\t1734567890\\tVISITOR_INFO1_LIVE\\tvalue")
             else:
                 print(f"⚠️  Файл cookies не найден: {cookie_file}")
         
