@@ -65,7 +65,7 @@ if [ ! -f ".deps_installed" ]; then
             print_status "Скачиваем CUDA keyring для ${CUDA_REPO}..."
             if wget -q --spider "$CUDA_KEYRING_URL" 2>/dev/null; then
                 wget -q "$CUDA_KEYRING_URL" -O /tmp/cuda-keyring.deb
-                sudo dpkg -i /tmp/cuda-keyring.deb
+                 dpkg -i /tmp/cuda-keyring.deb
                 rm -f /tmp/cuda-keyring.deb
                 print_success "Репозиторий NVIDIA CUDA добавлен"
             else
@@ -75,11 +75,11 @@ if [ ! -f ".deps_installed" ]; then
             print_status "Репозиторий NVIDIA CUDA уже настроен"
         fi
 
-        sudo apt-get update
+         apt-get update
 
         # Устанавливаем зависимости (пробуем установку с обработкой ошибок)
         set +e  # Временно отключаем остановку при ошибке
-        sudo apt-get install -y redis-server ffmpeg libcudnn8 libcudnn8-dev --allow-change-held-packages
+         apt-get install -y redis-server ffmpeg libcudnn8 libcudnn8-dev --allow-change-held-packages
         INSTALL_STATUS=$?
         set -e  # Включаем обратно остановку при ошибке
 
@@ -99,9 +99,9 @@ if [ ! -f ".deps_installed" ]; then
                     CUDA_REPO="ubuntu2204"
                 fi
                 CUDA_KEYRING_URL="https://developer.download.nvidia.com/compute/cuda/repos/${CUDA_REPO}/x86_64/cuda-keyring_1.1-1_all.deb"
-                wget -q "$CUDA_KEYRING_URL" -O /tmp/cuda-keyring.deb && sudo dpkg -i /tmp/cuda-keyring.deb && rm -f /tmp/cuda-keyring.deb
-                sudo apt-get update
-                sudo apt-get install -y libcudnn8 libcudnn8-dev --allow-change-held-packages
+                wget -q "$CUDA_KEYRING_URL" -O /tmp/cuda-keyring.deb &&  dpkg -i /tmp/cuda-keyring.deb && rm -f /tmp/cuda-keyring.deb
+                 apt-get update
+                 apt-get install -y libcudnn8 libcudnn8-dev --allow-change-held-packages
             fi
         fi
 
