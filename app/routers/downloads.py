@@ -25,6 +25,8 @@ class DownloadResponse(BaseModel):
 class SRTRequest(BaseModel):
     youtube_url: HttpUrl
     model_size: Optional[str] = "base"  # tiny, base, small, medium, large
+    
+    model_config = {"protected_namespaces": ()}
 
 
 class SRTResponse(BaseModel):
