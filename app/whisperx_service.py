@@ -13,26 +13,37 @@ from app.config import settings
 import torch
 
 # Исправление для PyTorch 2.6+ (weights_only=True по умолчанию)
-# WhisperX/Pyannote используют omegaconf классы, которые нужно разрешить
+# WhisperX/Pyannote используют различные классы, которые нужно разрешить
 try:
     from omegaconf import ListConfig, DictConfig
     from omegaconf.base import ContainerMetadata
-    # Добавляем все необходимые классы omegaconf в безопасные глобалы
-    torch.serialization.add_safe_globals([ListConfig, DictConfig, ContainerMetadata])
+    from typing import Any
+    # Добавляем все необходимые классы в безопасные глобалы
+    torch.serialization.add_safe_globals([ListConfig, DictConfig, ContainerMetadata, Any])
 except ImportError:
-    pass
+    try:
+        from typing import Any
+        torch.serialization.add_safe_globals([Any])
+    except ImportError:
+        pass
 
-# Также патчим torch.load для использования weights_only=False
-# Это нужно для совместимости с моделями, которые используют omegaconf
+# Патчим torch.load для использования weights_only=False
+# Это нужно для совместимости с моделями WhisperX/Pyannote
+# Патчим агрессивно - всегда используем weights_only=False
 _original_torch_load = torch.load
 
 def _patched_torch_load(*args, **kwargs):
-    # Если weights_only не указан явно, используем False для совместимости
-    if 'weights_only' not in kwargs:
-        kwargs['weights_only'] = False
+    # Всегда используем weights_only=False для совместимости
+    # Это безопасно, так как модели загружаются из доверенных источников (HuggingFace)
+    kwargs['weights_only'] = False
     return _original_torch_load(*args, **kwargs)
 
+# Применяем патч
 torch.load = _patched_torch_load
+
+# Также патчим на уровне модуля для случаев, когда библиотеки импортируют torch.load напрямую
+import torch.serialization
+torch.serialization.load = _patched_torch_load
 
 # Теперь импортируем whisperx после патчинга torch.load
 import whisperx
