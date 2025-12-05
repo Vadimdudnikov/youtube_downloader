@@ -900,6 +900,12 @@ def create_srt_task(self, youtube_url: str, model_size: str = "medium"):
             language=None,  # Автоопределение языка
             task="transcribe"
         )
+
+        # WhisperX BUGFIX: rename language field so it is not treated as a callable
+        if isinstance(result.get("language"), str):
+            result["detected_language"] = result["language"]
+            result["language"] = None
+
         
         print(f"Транскрибация завершена. Язык: {result.get('language', 'unknown')}")
         
