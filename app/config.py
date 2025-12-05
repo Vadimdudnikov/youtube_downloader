@@ -26,6 +26,11 @@ class Settings(BaseSettings):
     proxy_check_timeout: int = 5  # Таймаут проверки прокси в секундах
     proxy_check_url: str = "https://httpbin.org/ip"  # URL для проверки прокси
     
+    # Настройки WhisperX
+    whisperx_model: str = "medium"  # Модель WhisperX (tiny, base, small, medium, large)
+    chunk_duration_minutes: int = 10  # Длительность чанка для больших файлов в минутах
+    tmp_dir: str = "assets/tmp"  # Временная директория для задач
+    
     class Config:
         case_sensitive = False
 

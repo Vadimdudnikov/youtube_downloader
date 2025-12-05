@@ -1,18 +1,11 @@
 import os
-import asyncio
 import subprocess
-import sys
 import re
-import copy
 import json
-import shutil
-from celery import current_task
 from app.celery_app import celery_app
-from app.proxy_manager import proxy_manager
 from app.config import settings
 from app.rapidapi_service import RapidAPIService
-from faster_whisper import WhisperModel
-import torch
+from app.whisperx_service import WhisperXService
 
 import warnings
 
@@ -20,27 +13,6 @@ import warnings
 warnings.filterwarnings("ignore", category=UserWarning)
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=DeprecationWarning)
-
-# Торч + Торчаудио
-warnings.filterwarnings("ignore", message=".*torchaudio._backend.list_audio_backends.*")
-warnings.filterwarnings("ignore", message=".*TensorFloat-32.*")
-
-# faster-whisper warnings
-warnings.filterwarnings("ignore", message=".*faster_whisper.*")
-
-# Lightning spam
-warnings.filterwarnings("ignore", message=".*Lightning automatically upgraded.*")
-warnings.filterwarnings("ignore", module="pytorch_lightning")
-
-# SpeechBrain
-warnings.filterwarnings("ignore", module="speechbrain")
-
-# HF transformers
-warnings.filterwarnings("ignore", module="transformers")
-
-# Глобальный кэш для моделей faster-whisper (чтобы не загружать каждый раз)
-_whisper_models_cache = {}
-
 
 
 def ensure_directories():
@@ -53,35 +25,6 @@ def ensure_directories():
     os.makedirs(srt_dir, exist_ok=True)
     
     return video_dir, srt_dir
-
-
-def get_video_info(youtube_url: str) -> dict:
-    """Получаем информацию о видео через RapidAPI"""
-    try:
-        # Используем RapidAPI для получения информации о видео
-        rapidapi = RapidAPIService()
-        video_id = rapidapi.get_video_id_from_url(youtube_url)
-        
-        # Получаем информацию от RapidAPI с увеличенным таймаутом и несколькими попытками
-        info = rapidapi.get_info_from_rapidapi(video_id, timeout=60, max_retries=3)
-        
-        return {
-            'title': info.get('title', 'Unknown'),
-            'duration': info.get('duration', 0),
-            'uploader': info.get('uploader', 'Unknown'),
-            'view_count': info.get('view_count', 0),
-            'upload_date': info.get('upload_date', ''),
-        }
-    except Exception as e:
-        print(f"Ошибка получения информации о видео: {e}")
-        # Возвращаем значения по умолчанию, чтобы не блокировать выполнение задачи
-        return {
-            'title': 'Unknown',
-            'duration': 0,
-            'uploader': 'Unknown',
-            'view_count': 0,
-            'upload_date': '',
-        }
 
 
 def extract_youtube_id(url: str) -> str:
@@ -100,10 +43,6 @@ def extract_youtube_id(url: str) -> str:
     # Если не удалось извлечь ID, используем хеш от URL
     import hashlib
     return hashlib.md5(url.encode()).hexdigest()[:11]
-
-
-
-
 
 
 @celery_app.task(bind=True)
@@ -213,277 +152,115 @@ def download_video_task(self, youtube_url: str, audio_only: bool = False):
             'exc_type': type(e).__name__
         }
 
-@celery_app.task
-def update_proxies_task():
-    """Задача для обновления списка прокси"""
-    asyncio.run(proxy_manager.update_working_proxies())
-    return f"Обновлено {len(proxy_manager.working_proxies)} рабочих прокси"
-
-
-
-
-def format_timestamp(seconds: float) -> str:
-    """Форматирует время в формат SRT (HH:MM:SS,mmm)"""
-    hours = int(seconds // 3600)
-    minutes = int((seconds % 3600) // 60)
-    secs = int(seconds % 60)
-    millis = int((seconds % 1) * 1000)
-    return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
-
-
-def generate_json_from_segments(segments: list, output_path: str) -> str:
-    """Генерирует JSON файл из сегментов распознавания речи"""
-    # Формируем массив объектов
-    json_data = []
-    
-    for segment in segments:
-        json_data.append({
-            'start': segment['start'],
-            'end': segment['end'],
-            'text': segment['text'].strip()
-        })
-    
-    # Сохраняем в файл
-    with open(output_path, 'w', encoding='utf-8') as f:
-        json.dump(json_data, f, ensure_ascii=False, indent=4)
-    
-    return json.dumps(json_data, ensure_ascii=False, indent=4)
-
 
 @celery_app.task(bind=True)
-def create_srt_task(self, youtube_url: str, model_size: str = "medium"):
+def transcribe_audio_task(self, audio_path: str, task_id: str = None, model_size: str = None):
     """
-    Задача для создания SRT файла из аудио видео с YouTube
+    Задача для транскрипции аудио с использованием WhisperXService
     
     Args:
-        youtube_url: URL видео на YouTube
-        model_size: Размер модели Whisper (tiny, base, small, medium, large)
+        audio_path: Путь к аудио файлу для транскрипции
+        task_id: Идентификатор задачи (опционально)
+        model_size: Размер модели WhisperX (tiny, base, small, medium, large). По умолчанию из config
+        
+    Returns:
+        dict: Результат транскрипции с сегментами
     """
     try:
-        # Убеждаемся, что папки существуют
-        video_dir, srt_dir = ensure_directories()
+        print(f"🎤 Начинаем транскрипцию аудио: {audio_path}")
+        if task_id:
+            print(f"  Task ID: {task_id}")
         
-        # Извлекаем YouTube ID
-        youtube_id = extract_youtube_id(youtube_url)
-        print(f"Создание JSON субтитров для YouTube ID: {youtube_id}")
+        # Обновляем статус задачи
+        self.update_state(
+            state='PROGRESS',
+            meta={'status': 'Инициализация транскрипции...', 'progress': 0}
+        )
         
-        # Проверяем, существует ли уже JSON файл - если да, сразу возвращаем его
-        json_file = f"{youtube_id}.json"
-        json_path = os.path.join(srt_dir, json_file)
+        # Проверяем существование файла
+        if not os.path.exists(audio_path):
+            raise FileNotFoundError(f"Аудио файл не найден: {audio_path}")
         
-        if os.path.exists(json_path):
-            self.update_state(
-                state='PROGRESS',
-                meta={'status': 'JSON файл уже существует', 'progress': 100}
-            )
-            
-            file_size = os.path.getsize(json_path)
-            
-            return {
-                'status': 'completed',
-                'progress': 100,
-                'message': 'JSON файл уже существует',
-                'file_path': json_path,
-                'file_name': json_file,
-                'file_size': file_size,
-                'youtube_id': youtube_id,
-                'cached': True
-            }
+        # Проверяем, есть ли mp3 файл, если есть - используем его, иначе wav
+        audio_mp3_path = audio_path.replace('.wav', '.mp3') if audio_path.endswith('.wav') else audio_path
+        audio_wav_path = audio_path.replace('.mp3', '.wav') if audio_path.endswith('.mp3') else audio_path
+        
+        if os.path.exists(audio_mp3_path) and audio_mp3_path != audio_path:
+            audio_path = audio_mp3_path
+            print(f"📁 Используем MP3 файл для транскрипции: {audio_path}")
+        elif os.path.exists(audio_wav_path) and audio_wav_path != audio_path:
+            audio_path = audio_wav_path
+            print(f"📁 Используем WAV файл для транскрипции: {audio_path}")
         
         # Обновляем статус
         self.update_state(
             state='PROGRESS',
-            meta={'status': 'Проверяем наличие аудио...', 'progress': 0}
+            meta={'status': 'Создаем сервис транскрипции...', 'progress': 10}
         )
         
-        # Проверяем наличие аудио файла
-        audio_file = f"{youtube_id}.mp3"
-        audio_path = os.path.join(video_dir, audio_file)
-        audio_exists = os.path.exists(audio_path)
+        # Создаём сервис транскрипции и выполняем транскрипцию
+        transcription_service = WhisperXService(model_size=model_size)
         
-        # Если аудио нет, скачиваем его
-        if not audio_exists:
-            self.update_state(
-                state='PROGRESS',
-                meta={'status': 'Аудио не найдено. Загружаем аудио...', 'progress': 10}
-            )
-            
-            print(f"Аудио файл не найден. Загружаем аудио для {youtube_url}")
-            
-            # Запускаем задачу загрузки аудио синхронно
-            download_result = download_video_task.apply(args=[youtube_url, True])
-            
-            if download_result.successful():
-                result = download_result.result
-                if isinstance(result, dict) and result.get('status') == 'failed':
-                    raise Exception(f"Ошибка загрузки аудио: {result.get('error', 'Неизвестная ошибка')}")
-            else:
-                raise Exception(f"Ошибка загрузки аудио: {str(download_result.info)}")
-            
-            # Проверяем, что файл появился
-            if not os.path.exists(audio_path):
-                raise Exception("Аудио файл не был создан после загрузки")
-            
-            print(f"Аудио успешно загружено: {audio_file}")
+        self.update_state(
+            state='PROGRESS',
+            meta={'status': 'Выполняем транскрипцию...', 'progress': 20}
+        )
+        
+        transcription_result = transcription_service.transcribe_audio(audio_path)
+        
+        # Проверяем результат транскрипции
+        if isinstance(transcription_result, dict):
+            segments = transcription_result.get('segments', [])
         else:
-            print(f"Используем существующий аудио файл: {audio_file}")
+            segments = transcription_result if isinstance(transcription_result, list) else []
         
-        # Загружаем модель faster-whisper
+        # Если сегментов нет - это ошибка
+        if not segments or len(segments) == 0:
+            error_msg = f"WhisperX не смог распознать речь в аудио файле (0 сегментов). Возможные причины: тихий звук, фоновый шум, поврежденный файл"
+            print(f"❌ {error_msg}")
+            raise Exception(error_msg)
+        
+        # Если указан task_id, сохраняем результат в JSON файл
+        if task_id:
+            # Убеждаемся, что базовая директория существует
+            os.makedirs(settings.tmp_dir, exist_ok=True)
+            task_dir = os.path.join(settings.tmp_dir, task_id)
+            os.makedirs(task_dir, exist_ok=True)
+            
+            original_json_path = os.path.join(task_dir, 'original.json')
+            with open(original_json_path, 'w', encoding='utf-8') as f:
+                json.dump(transcription_result, f, ensure_ascii=False, indent=4)
+            
+            print(f"✅ Результат сохранен в: {original_json_path}")
+        
+        # Обновляем статус
         self.update_state(
             state='PROGRESS',
-            meta={'status': f'Загружаем модель faster-whisper ({model_size})...', 'progress': 20}
+            meta={'status': f'Транскрипция завершена: {len(segments)} сегментов', 'progress': 100}
         )
         
-        # Определяем устройство (GPU или CPU)
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        compute_type = "float16" if device == "cuda" else "int8"
+        # Создаём словарь с результатом
+        message = f'Транскрипция завершена: {len(segments)} сегментов'
         
-        if device == "cuda":
-            print(f"Используем GPU: {torch.cuda.get_device_name(0)}")
-            print(f"CUDA версия: {torch.version.cuda}")
-            print(f"Compute type: {compute_type} (FP16)")
-            # Оптимизируем для GPU
-            torch.backends.cudnn.benchmark = True
-        else:
-            print("GPU не доступен, используем CPU")
-            print(f"Compute type: {compute_type} (int8)")
-        
-        # Кэшируем модель faster-whisper (загружаем только один раз)
-        cache_key = f"{model_size}_{device}_{compute_type}"
-        if cache_key not in _whisper_models_cache:
-            print(f"Загружаем модель faster-whisper: {model_size} на устройстве: {device} (первая загрузка, будет кэширована)")
-            self.update_state(
-                state='PROGRESS',
-                meta={'status': f'Загружаем модель faster-whisper ({model_size})...', 'progress': 20}
-            )
-            # Загружаем модель faster-whisper
-            model = WhisperModel(
-                model_size,
-                device=device,
-                compute_type=compute_type
-            )
-            
-            _whisper_models_cache[cache_key] = model
-            print(f"✅ Модель faster-whisper загружена и закэширована")
-        else:
-            print(f"✅ Используем закэшированную модель faster-whisper: {model_size} на {device}")
-            model = _whisper_models_cache[cache_key]
-        
-        # Распознаем речь
-        self.update_state(
-            state='PROGRESS',
-            meta={'status': 'Распознаем речь...', 'progress': 40}
-        )
-        
-        print(f"Начинаем распознавание речи из файла: {audio_path}")
-        print("Начинаем транскрибацию с faster-whisper...")
-        
-        # Транскрибируем аудио
-        segments_generator, info = model.transcribe(
-            audio_path,
-            beam_size=5,
-            language=None,  # Автоопределение языка
-            task="transcribe",
-            vad_filter=True,  # Используем встроенный VAD фильтр
-            vad_parameters=dict(min_silence_duration_ms=500)  # Минимальная длительность тишины
-        )
-        
-        print(f"Транскрибация завершена. Язык: {info.language}")
-        
-        # Извлекаем segments и разбиваем на предложения
-        segments_list = []
-        for segment in segments_generator:
-            text = segment.text.strip()
-            if not text:
-                continue
-            
-            # Разбиваем текст на предложения по знакам препинания
-            import re
-            sentences = re.split(r'([.!?]+)', text)
-            
-            # Объединяем знаки препинания с предыдущим предложением
-            sentence_parts = []
-            for i in range(0, len(sentences) - 1, 2):
-                if i + 1 < len(sentences):
-                    sentence = (sentences[i] + sentences[i + 1]).strip()
-                    if sentence:
-                        sentence_parts.append(sentence)
-                else:
-                    if sentences[i].strip():
-                        sentence_parts.append(sentences[i].strip())
-            
-            # Если не удалось разбить на предложения, используем весь текст
-            if not sentence_parts:
-                sentence_parts = [text] if text else []
-            
-            # Распределяем время между предложениями пропорционально их длине
-            if len(sentence_parts) > 1:
-                total_chars = sum(len(s) for s in sentence_parts)
-                current_time = segment.start
-                duration = segment.end - segment.start
-                
-                for i, sentence in enumerate(sentence_parts):
-                    if i == len(sentence_parts) - 1:
-                        # Последнее предложение заканчивается в segment.end
-                        seg_end = segment.end
-                    else:
-                        # Пропорционально длине текста
-                        seg_duration = (len(sentence) / total_chars) * duration
-                        seg_end = current_time + seg_duration
-                    
-                    segments_list.append({
-                        'start': current_time,
-                        'end': seg_end,
-                        'text': sentence
-                    })
-                    
-                    current_time = seg_end
-            else:
-                # Если одно предложение или не удалось разбить
-                segments_list.append({
-                    'start': segment.start,
-                    'end': segment.end,
-                    'text': text
-                })
-        
-        print(f"Транскрибация завершена. Найдено сегментов: {len(segments_list)}")
-        
-        # Генерируем JSON файл
-        self.update_state(
-            state='PROGRESS',
-            meta={'status': 'Генерируем JSON файл...', 'progress': 90}
-        )
-        
-        print(f"Генерируем JSON файл: {json_path}")
-        generate_json_from_segments(segments_list, json_path)
-        
-        file_size = os.path.getsize(json_path)
-        
-        self.update_state(
-            state='PROGRESS',
-            meta={'status': 'JSON файл создан успешно', 'progress': 100}
-        )
-        
-        return {
-            'status': 'completed',
-            'progress': 100,
-            'message': 'JSON файл успешно создан',
-            'file_path': json_path,
-            'file_name': json_file,
-            'file_size': file_size,
-            'youtube_id': youtube_id,
-            'cached': False,
-            'audio_cached': audio_exists
+        result = {
+            'status': 'success',
+            'segments': segments,
+            'message': message,
+            'segments_count': len(segments)
         }
+        
+        print(f"✅ Транскрипция завершена: {len(segments)} сегментов")
+        return result
         
     except Exception as e:
         error_message = str(e)
-        print(f"Ошибка создания JSON: {error_message}")
+        print(f"❌ Ошибка транскрипции: {error_message}")
         
+        # Обновляем статус задачи с ошибкой
         self.update_state(
             state='FAILURE',
             meta={
-                'status': 'Ошибка создания JSON',
+                'status': 'Ошибка транскрипции',
                 'error': error_message,
                 'exc_type': type(e).__name__
             }

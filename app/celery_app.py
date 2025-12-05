@@ -25,13 +25,6 @@ celery_app.conf.update(
             'exchange': 'youtube_download',
             'routing_key': 'youtube_download',
         },
-        'srt_creation': {
-            'exchange': 'srt_creation',
-            'routing_key': 'srt_creation',
-        },
-    },
-    task_routes={
-        'app.tasks.create_srt_task': {'queue': 'srt_creation'},
     },
 )
 

@@ -14,12 +14,15 @@ redis==5.0.1
 
 requests==2.31.0
 
-# faster-whisper для транскрибации (быстрее и стабильнее чем WhisperX)
-faster-whisper>=1.0.0
+# whisperx для транскрибации с поддержкой word-level timestamps и диаризации
+whisperx>=3.1.0
 
-# PyTorch для faster-whisper
+# PyTorch для whisperx
 torch>=2.0.0
 torchaudio>=2.0.0
+
+# pydub для работы с аудио файлами (для разбиения больших файлов)
+pydub>=0.25.1
 # Для использования GPU установите PyTorch с поддержкой CUDA:
 # pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu118
 # или для CUDA 11.8: pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu118
