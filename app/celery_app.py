@@ -25,6 +25,13 @@ celery_app.conf.update(
             'exchange': 'youtube_download',
             'routing_key': 'youtube_download',
         },
+        'transcription': {
+            'exchange': 'transcription',
+            'routing_key': 'transcription',
+        },
+    },
+    task_routes={
+        'app.tasks.transcribe_audio_task': {'queue': 'transcription'},
     },
 )
 

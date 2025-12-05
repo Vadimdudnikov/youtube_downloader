@@ -1,136 +1,294 @@
 #!/bin/bash
 
-# YouTube Download API - Скрипт запуска
-# Автор: Assistant
-# Описание: Запускает Redis, Celery worker и FastAPI приложение
+# Скрипт для запуска YouTube Download API и воркеров
 
-echo "🚀 Запуск YouTube Download API..."
+set -e  # Остановка при ошибке
+
+# Цвета для вывода
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# Функция для вывода с цветом
+print_status() {
+    echo -e "${BLUE}[INFO]${NC} $1"
+}
+
+print_success() {
+    echo -e "${GREEN}[SUCCESS]${NC} $1"
+}
+
+print_warning() {
+    echo -e "${YELLOW}[WARNING]${NC} $1"
+}
+
+print_error() {
+    echo -e "${RED}[ERROR]${NC} $1"
+}
+
+# Проверяем, что мы в правильной директории
+if [ ! -f "app/celery_app.py" ]; then
+    print_error "Скрипт должен быть запущен из корневой директории проекта"
+    exit 1
+fi
 
 # Проверяем наличие Python
 if ! command -v python &> /dev/null; then
-    echo "❌ Python не найден. Установите Python 3.8+"
+    print_error "Python не найден. Установите Python 3.8+"
     exit 1
 fi
 
-# Проверяем наличие Redis
-if ! command -v redis-server &> /dev/null; then
-    echo "❌ Redis не найден. Установите Redis:"
-    echo "   Windows: choco install redis-64"
-    echo "   Ubuntu: sudo apt install redis-server"
-    echo "   macOS: brew install redis"
-    exit 1
+# ✅ Устанавливаем системные зависимости только один раз
+if [ ! -f ".deps_installed" ]; then
+    print_status "Устанавливаем необходимые системные зависимости (Redis, FFmpeg, cuDNN)..."
+
+    # Проверяем и добавляем репозиторий NVIDIA CUDA при необходимости (только для Linux)
+    if [[ "$OSTYPE" == "linux-gnu"* ]]; then
+        if ! dpkg -l | grep -q cuda-keyring 2>/dev/null; then
+            print_status "Добавляем репозиторий NVIDIA CUDA..."
+            # Определяем версию Ubuntu для правильного репозитория
+            UBUNTU_VERSION=$(lsb_release -rs 2>/dev/null || echo "22.04")
+            if [ "$UBUNTU_VERSION" = "20.04" ]; then
+                CUDA_REPO="ubuntu2004"
+            elif [ "$UBUNTU_VERSION" = "22.04" ]; then
+                CUDA_REPO="ubuntu2204"
+            elif [ "$UBUNTU_VERSION" = "24.04" ]; then
+                CUDA_REPO="ubuntu2404"
+            else
+                CUDA_REPO="ubuntu2204"  # По умолчанию
+                print_warning "Неизвестная версия Ubuntu ${UBUNTU_VERSION}, используем ubuntu2204"
+            fi
+
+            CUDA_KEYRING_URL="https://developer.download.nvidia.com/compute/cuda/repos/${CUDA_REPO}/x86_64/cuda-keyring_1.1-1_all.deb"
+            print_status "Скачиваем CUDA keyring для ${CUDA_REPO}..."
+            if wget -q --spider "$CUDA_KEYRING_URL" 2>/dev/null; then
+                wget -q "$CUDA_KEYRING_URL" -O /tmp/cuda-keyring.deb
+                sudo dpkg -i /tmp/cuda-keyring.deb
+                rm -f /tmp/cuda-keyring.deb
+                print_success "Репозиторий NVIDIA CUDA добавлен"
+            else
+                print_warning "Не удалось скачать CUDA keyring, пропускаем..."
+            fi
+        else
+            print_status "Репозиторий NVIDIA CUDA уже настроен"
+        fi
+
+        sudo apt-get update
+
+        # Устанавливаем зависимости (пробуем установку с обработкой ошибок)
+        set +e  # Временно отключаем остановку при ошибке
+        sudo apt-get install -y redis-server ffmpeg libcudnn8 libcudnn8-dev --allow-change-held-packages
+        INSTALL_STATUS=$?
+        set -e  # Включаем обратно остановку при ошибке
+
+        if [ $INSTALL_STATUS -ne 0 ]; then
+            print_warning "Не удалось установить некоторые пакеты, проверяем cuDNN..."
+            # Если libcudnn8 не установился, пробуем добавить репозиторий снова
+            if ! dpkg -l | grep -q libcudnn8 2>/dev/null; then
+                print_status "Пробуем добавить репозиторий CUDA ещё раз..."
+                UBUNTU_VERSION=$(lsb_release -rs 2>/dev/null || echo "22.04")
+                if [ "$UBUNTU_VERSION" = "20.04" ]; then
+                    CUDA_REPO="ubuntu2004"
+                elif [ "$UBUNTU_VERSION" = "22.04" ]; then
+                    CUDA_REPO="ubuntu2204"
+                elif [ "$UBUNTU_VERSION" = "24.04" ]; then
+                    CUDA_REPO="ubuntu2404"
+                else
+                    CUDA_REPO="ubuntu2204"
+                fi
+                CUDA_KEYRING_URL="https://developer.download.nvidia.com/compute/cuda/repos/${CUDA_REPO}/x86_64/cuda-keyring_1.1-1_all.deb"
+                wget -q "$CUDA_KEYRING_URL" -O /tmp/cuda-keyring.deb && sudo dpkg -i /tmp/cuda-keyring.deb && rm -f /tmp/cuda-keyring.deb
+                sudo apt-get update
+                sudo apt-get install -y libcudnn8 libcudnn8-dev --allow-change-held-packages
+            fi
+        fi
+
+        echo 'export LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH' >> ~/.bashrc
+        export LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
+    else
+        # Для Windows/macOS просто проверяем наличие Redis и FFmpeg
+        print_status "Проверяем наличие Redis и FFmpeg..."
+        if ! command -v redis-server &> /dev/null; then
+            print_warning "Redis не найден. Установите Redis:"
+            print_warning "   Windows: choco install redis-64"
+            print_warning "   macOS: brew install redis"
+        fi
+        if ! command -v ffmpeg &> /dev/null; then
+            print_warning "FFmpeg не найден. Установите FFmpeg:"
+            print_warning "   Windows: choco install ffmpeg"
+            print_warning "   macOS: brew install ffmpeg"
+        fi
+    fi
+
+    touch .deps_installed
+    print_success "Зависимости установлены"
+else
+    print_status "Зависимости уже установлены (пропускаем установку)"
 fi
+
+print_status "🚀 Запуск YouTube Download API..."
 
 # Проверяем наличие виртуального окружения
 if [ ! -d "venv" ]; then
-    echo "📦 Создаем виртуальное окружение..."
+    print_status "Создаем виртуальное окружение..."
     python -m venv venv
 fi
 
 # Активируем виртуальное окружение
-echo "🔧 Активируем виртуальное окружение..."
-source venv/bin/activate 2>/dev/null
+print_status "Активируем виртуальное окружение..."
+source venv/bin/activate 2>/dev/null || source venv/Scripts/activate 2>/dev/null
 
-# Устанавливаем зависимости
-echo "📥 Устанавливаем зависимости..."
-pip install -r requirements.txt
+# Устанавливаем Python зависимости
+print_status "Устанавливаем Python зависимости..."
+pip install -r requirements.txt --quiet
 
 # Проверяем наличие .env файла
 if [ ! -f ".env" ]; then
-    echo "⚠️  Файл .env не найден. Создаем из примера..."
-    cp env_example.txt .env
-    echo "📝 Отредактируйте файл .env и добавьте ваш API ключ для прокси"
-    echo "   PROXY_API_KEY=ваш_api_ключ_здесь"
+    if [ -f "env_example.txt" ]; then
+        print_warning "Файл .env не найден. Создаем из примера..."
+        cp env_example.txt .env
+        print_warning "Отредактируйте файл .env и добавьте ваш API ключ для прокси"
+    fi
 fi
 
-# Создаем папки assets и подпапки если их нет
-if [ ! -d "assets" ]; then
-    echo "📁 Создаем папку assets..."
-    mkdir assets
-fi
-if [ ! -d "assets/video" ]; then
-    echo "📁 Создаем папку assets/video..."
-    mkdir -p assets/video
-fi
-if [ ! -d "assets/srt" ]; then
-    echo "📁 Создаем папку assets/srt..."
-    mkdir -p assets/srt
-fi
+# Создаём директорию для логов если её нет
+mkdir -p logs
 
-# Проверяем запущен ли Redis
-echo "🔍 Проверяем Redis..."
-if ! redis-cli ping &> /dev/null; then
-    echo "🔄 Запускаем Redis..."
-    redis-server --daemonize yes
+# Создаем необходимые директории
+print_status "Создаем необходимые директории..."
+mkdir -p assets/video
+mkdir -p assets/srt
+mkdir -p assets/tmp
+
+# Проверяем наличие Redis
+print_status "Проверяем Redis..."
+if ! redis-cli ping > /dev/null 2>&1; then
+    print_warning "Redis не запущен. Запускаем Redis..."
+    redis-server --daemonize yes 2>/dev/null || redis-server --service-start 2>/dev/null || true
     sleep 2
-    
-    # Проверяем что Redis запустился
-    if ! redis-cli ping &> /dev/null; then
-        echo "❌ Не удалось запустить Redis"
+    if ! redis-cli ping > /dev/null 2>&1; then
+        print_error "Не удалось запустить Redis. Убедитесь, что Redis установлен."
         exit 1
     fi
-    echo "✅ Redis запущен"
-else
-    echo "✅ Redis уже запущен"
 fi
+print_success "Redis работает"
 
-# Функция для остановки всех процессов
+# Функция для запуска воркера
+start_worker() {
+    local queue_name=$1
+    local worker_name=$2
+    local log_file="logs/${queue_name}_worker.log"
+
+    print_status "Запускаем воркер ${worker_name} (очередь: ${queue_name})..."
+
+    # Запускаем воркер в фоне
+    celery -A app.celery_app:celery_app worker \
+        --loglevel=info \
+        --queues=${queue_name} \
+        --hostname=${worker_name}@%h \
+        --concurrency=1 \
+        --logfile=${log_file} \
+        --pidfile=logs/${queue_name}_worker.pid \
+        > /dev/null 2>&1 &
+
+    # Ждем создания PID файла с таймаутом
+    local timeout=30
+    local count=0
+    while [ $count -lt $timeout ]; do
+        if [ -f "logs/${queue_name}_worker.pid" ]; then
+            local pid=$(cat logs/${queue_name}_worker.pid)
+            if kill -0 $pid 2>/dev/null; then
+                print_success "Воркер ${worker_name} запущен (PID: ${pid})"
+                return 0
+            else
+                print_warning "PID файл создан, но процесс не найден, ждем..."
+            fi
+        fi
+        sleep 1
+        count=$((count + 1))
+    done
+
+    # Если PID файл так и не создался
+    if [ ! -f "logs/${queue_name}_worker.pid" ]; then
+        print_error "Не удалось запустить воркер ${worker_name} (PID файл не создан за $timeout секунд)"
+        # Проверяем логи на ошибки
+        if [ -f "$log_file" ]; then
+            print_error "Последние строки лога:"
+            tail -5 "$log_file" | while read line; do
+                print_error "  $line"
+            done
+        fi
+        return 1
+    fi
+}
+
+# Функция для остановки воркера
+stop_worker() {
+    local queue_name=$1
+    local pid_file="logs/${queue_name}_worker.pid"
+
+    if [ -f "$pid_file" ]; then
+        local pid=$(cat "$pid_file")
+        print_status "Останавливаем воркер ${queue_name} (PID: ${pid})..."
+        kill $pid 2>/dev/null || true
+        rm -f "$pid_file"
+        print_success "Воркер ${queue_name} остановлен"
+    fi
+}
+
+# Функция для очистки при выходе
 cleanup() {
-    echo ""
-    echo "🛑 Останавливаем все процессы..."
-    kill $CELERY_PID 2>/dev/null
-    kill $CELERY_SRT_PID 2>/dev/null
-    kill $FASTAPI_PID 2>/dev/null
-    echo "✅ Все процессы остановлены"
+    print_status "Останавливаем все воркеры..."
+    stop_worker "youtube_download"
+    stop_worker "transcription"
+
+    if [ ! -z "$API_PID" ]; then
+        print_status "Останавливаем API (PID: $API_PID)..."
+        kill $API_PID 2>/dev/null || true
+    fi
+
+    print_success "Все сервисы остановлены"
     exit 0
 }
 
-# Устанавливаем обработчик сигналов
+# Устанавливаем обработчик сигналов для корректного завершения
 trap cleanup SIGINT SIGTERM
 
-# Запускаем Celery worker для загрузки видео/аудио в фоне
-echo "🔄 Запускаем Celery worker для загрузки..."
-celery -A app.celery_app worker --loglevel=info --queues=youtube_download --concurrency=2 --hostname=worker@%h &
-CELERY_PID=$!
+# Запускаем воркеры
+print_status "Запускаем воркеры Celery..."
+start_worker "youtube_download" "download_worker"
+start_worker "transcription" "transcription_worker"
 
-# Запускаем отдельный Celery worker для создания SRT (только 1 задача одновременно)
-echo "🔄 Запускаем Celery worker для создания SRT..."
-celery -A app.celery_app worker --loglevel=info --queues=srt_creation --concurrency=2 --hostname=srt_worker@%h &
-CELERY_SRT_PID=$!
+print_success "Все воркеры запущены"
 
-# Ждем немного чтобы Celery workers запустились
-sleep 3
+# Запускаем API
+print_status "Запускаем FastAPI сервер..."
+uvicorn main:app \
+    --host 0.0.0.0 \
+    --port 3000 \
+    --log-level info \
+    --access-log \
+    > logs/api.log 2>&1 &
 
-# Запускаем FastAPI приложение в фоне
-echo "🔄 Запускаем FastAPI приложение..."
-uvicorn main:app --host 0.0.0.0 --port 3000 --reload &
-FASTAPI_PID=$!
+API_PID=$!
+sleep 2
 
-# Ждем немного чтобы FastAPI запустился
-sleep 3
+# Проверяем, что API запустился
+if kill -0 $API_PID 2>/dev/null; then
+    print_success "API запущен (PID: $API_PID)"
+    print_success "API доступен по адресу: http://localhost:3000"
+    print_success "Документация API: http://localhost:3000/docs"
+else
+    print_error "Не удалось запустить API"
+    cleanup
+    exit 1
+fi
 
-echo ""
-echo "🎉 YouTube Download API запущен!"
-echo ""
-echo "📊 Статус сервисов:"
-echo "   • Redis: ✅ Запущен"
-echo "   • Celery Worker (загрузка): ✅ Запущен (PID: $CELERY_PID)"
-echo "   • Celery Worker (SRT): ✅ Запущен (PID: $CELERY_SRT_PID, concurrency=1)"
-echo "   • FastAPI: ✅ Запущен (PID: $FASTAPI_PID)"
-echo ""
-echo "🌐 Доступные URL:"
-echo "   • API: http://localhost:3000"
-echo "   • Документация: http://localhost:3000/docs"
-echo "   • Альтернативная документация: http://localhost:3000/redoc"
-echo ""
-echo "📋 Полезные команды:"
-echo "   • Проверить статус прокси: curl http://localhost:3000/api/v1/proxies/status"
-echo "   • Обновить прокси: curl -X POST http://localhost:3000/api/v1/proxies/update"
-echo "   • Список файлов: curl http://localhost:3000/api/v1/list"
-echo "   • Создать SRT: curl -X POST http://localhost:3000/api/v1/srt -H 'Content-Type: application/json' -d '{\"youtube_url\": \"https://youtube.com/watch?v=...\"}'"
-echo ""
-echo "⏹️  Для остановки нажмите Ctrl+C"
+print_success "🎉 YouTube Download API полностью запущен!"
+print_status "Для остановки нажмите Ctrl+C"
 echo ""
 
-# Ждем завершения процессов
-wait $CELERY_PID $CELERY_SRT_PID $FASTAPI_PID
+# Ждём сигнала завершения
+wait
