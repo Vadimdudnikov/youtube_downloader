@@ -181,6 +181,16 @@ def transcribe_audio_task(self, audio_path: str, task_id: str = None, model_size
         if not os.path.exists(audio_path):
             raise FileNotFoundError(f"Аудио файл не найден: {audio_path}")
         
+        # Сохраняем исходный путь к MP3 файлу для возможного удаления при ошибке
+        original_mp3_path = None
+        if audio_path.endswith('.mp3'):
+            original_mp3_path = audio_path
+        elif audio_path.endswith('.wav'):
+            # Пытаемся найти соответствующий MP3 файл
+            original_mp3_path = audio_path.replace('.wav', '.mp3')
+            if not os.path.exists(original_mp3_path):
+                original_mp3_path = None
+        
         # Проверяем, есть ли mp3 файл, если есть - используем его, иначе wav
         audio_mp3_path = audio_path.replace('.wav', '.mp3') if audio_path.endswith('.wav') else audio_path
         audio_wav_path = audio_path.replace('.mp3', '.wav') if audio_path.endswith('.mp3') else audio_path
@@ -188,6 +198,9 @@ def transcribe_audio_task(self, audio_path: str, task_id: str = None, model_size
         if os.path.exists(audio_mp3_path) and audio_mp3_path != audio_path:
             audio_path = audio_mp3_path
             print(f"📁 Используем MP3 файл для транскрипции: {audio_path}")
+            # Обновляем original_mp3_path, если нашли MP3
+            if not original_mp3_path:
+                original_mp3_path = audio_mp3_path
         elif os.path.exists(audio_wav_path) and audio_wav_path != audio_path:
             audio_path = audio_wav_path
             print(f"📁 Используем WAV файл для транскрипции: {audio_path}")
@@ -265,7 +278,41 @@ def transcribe_audio_task(self, audio_path: str, task_id: str = None, model_size
         error_message = str(e)
         print(f"❌ Ошибка транскрипции: {error_message}")
         
-        # Обновляем статус задачи с ошибкой
+        # Если ошибка связана с 0 сегментами, удаляем исходный MP3 файл
+        if "0 сегментов" in error_message or "не смог распознать речь" in error_message:
+            # Пытаемся найти и удалить исходный MP3 файл
+            mp3_to_delete = None
+            
+            try:
+                # Проверяем, был ли сохранен original_mp3_path
+                if 'original_mp3_path' in locals() and original_mp3_path and os.path.exists(original_mp3_path):
+                    mp3_to_delete = original_mp3_path
+                elif 'audio_path' in locals():
+                    # Пытаемся определить MP3 файл из audio_path
+                    if audio_path.endswith('.mp3') and os.path.exists(audio_path):
+                        mp3_to_delete = audio_path
+                    elif audio_path.endswith('.wav'):
+                        mp3_path = audio_path.replace('.wav', '.mp3')
+                        if os.path.exists(mp3_path):
+                            mp3_to_delete = mp3_path
+            except (NameError, AttributeError):
+                # Если переменные не определены, пытаемся использовать исходный audio_path из параметров
+                # audio_path доступен как параметр функции
+                if audio_path.endswith('.mp3') and os.path.exists(audio_path):
+                    mp3_to_delete = audio_path
+                elif audio_path.endswith('.wav'):
+                    mp3_path = audio_path.replace('.wav', '.mp3')
+                    if os.path.exists(mp3_path):
+                        mp3_to_delete = mp3_path
+            
+            if mp3_to_delete:
+                try:
+                    os.remove(mp3_to_delete)
+                    print(f"🗑️ Удален исходный MP3 файл: {mp3_to_delete}")
+                except Exception as delete_error:
+                    print(f"⚠️ Не удалось удалить MP3 файл {mp3_to_delete}: {delete_error}")
+        
+        # Обновляем статус задачи с ошибкой перед пробросом исключения
         self.update_state(
             state='FAILURE',
             meta={
@@ -275,11 +322,9 @@ def transcribe_audio_task(self, audio_path: str, task_id: str = None, model_size
             }
         )
         
-        return {
-            'status': 'failed',
-            'error': error_message,
-            'exc_type': type(e).__name__
-        }
+        # Пробрасываем исключение дальше, чтобы задача считалась неуспешной (FAILURE)
+        # Это позволит правильно обработать ошибку в вызывающем коде
+        raise
 
 
 @celery_app.task(bind=True)
@@ -394,7 +439,17 @@ def create_srt_from_youtube_task(self, youtube_url: str, model_size: str = "medi
                 'audio_cached': audio_exists
             }
         else:
-            raise Exception(f"Ошибка транскрипции: {str(transcription_result.info)}")
+            # Задача транскрипции завершилась с ошибкой
+            # Извлекаем информацию об ошибке из task.info
+            error_info = transcription_result.info
+            if isinstance(error_info, dict):
+                error_message = error_info.get('error', 'Неизвестная ошибка транскрипции')
+            elif isinstance(error_info, Exception):
+                error_message = str(error_info)
+            else:
+                error_message = str(error_info) if error_info else 'Неизвестная ошибка транскрипции'
+            
+            raise Exception(f"Ошибка транскрипции: {error_message}")
         
     except Exception as e:
         error_message = str(e)
