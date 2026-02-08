@@ -132,12 +132,16 @@ async def get_download_status(task_id: str):
         raise HTTPException(status_code=400, detail=f"Ошибка получения статуса: {str(e)}")
 
 
-@router.get("/file/{filename}")
+@router.get("/file/{filename:path}")
 async def download_file(
     filename: str,
     no_vocals: Optional[bool] = Query(False, description="Скачать версию без голоса (из nvoice)")
 ):
     """Скачать загруженный файл (video, srt, nvoice). Для MP3 с тем же именем используйте ?no_vocals=true для инструментала."""
+    # На случай если query попал в path (прокси/клиент): оставляем только имя файла
+    filename = filename.split("?")[0].strip() or filename
+    if not filename:
+        raise HTTPException(status_code=400, detail="Не указано имя файла")
     video_path = _ASSETS_DIR / "video" / filename
     srt_path = _ASSETS_DIR / "srt" / filename
     nvoice_path = _ASSETS_DIR / "nvoice" / filename
