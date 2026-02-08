@@ -138,8 +138,15 @@ async def download_file(
     no_vocals: Optional[bool] = Query(False, description="Скачать версию без голоса (из nvoice)")
 ):
     """Скачать загруженный файл (video, srt, nvoice). Для MP3 с тем же именем используйте ?no_vocals=true для инструментала."""
-    # На случай если query попал в path (прокси/клиент): оставляем только имя файла
-    filename = filename.split("?")[0].strip() or filename
+    # Если query попал в path (прокси/клиент: path = "file.mp3?no_vocals=true") — вытаскиваем имя и флаг
+    if "?" in filename:
+        name_part, query_part = filename.split("?", 1)
+        filename = name_part.strip()
+        q = query_part.lower()
+        if "no_vocals=true" in q or "no_vocals=1" in q:
+            no_vocals = True
+    else:
+        filename = filename.strip()
     if not filename:
         raise HTTPException(status_code=400, detail="Не указано имя файла")
     video_path = _ASSETS_DIR / "video" / filename
