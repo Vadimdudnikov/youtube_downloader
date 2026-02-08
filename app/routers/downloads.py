@@ -145,17 +145,17 @@ async def download_file(
     video_path = _ASSETS_DIR / "video" / filename
     srt_path = _ASSETS_DIR / "srt" / filename
     nvoice_path = _ASSETS_DIR / "nvoice" / filename
-    
-    if no_vocals and nvoice_path.exists():
-        file_path = nvoice_path
-    elif video_path.exists():
-        file_path = video_path
-    elif srt_path.exists():
-        file_path = srt_path
-    elif nvoice_path.exists():
-        file_path = nvoice_path
+
+    if no_vocals:
+        # Только версия без голоса — не отдаём базовый mp3
+        file_path = nvoice_path if nvoice_path.exists() else None
     else:
-        file_path = None
+        file_path = (
+            video_path if video_path.exists() else
+            srt_path if srt_path.exists() else
+            nvoice_path if nvoice_path.exists() else
+            None
+        )
     
     if not file_path:
         paths_checked = [
