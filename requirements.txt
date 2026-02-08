@@ -17,6 +17,10 @@ requests>=2.31.0
 whisperx==3.4.3
 pydub>=0.25.1
 
+# Demucs для разделения вокала/инструментала (аудио без голоса)
+demucs>=4.0.0
+soundfile>=0.12.0
+
 # PyTorch для WhisperX (CUDA 12.4)
 # Установка: pip install torch torchaudio torchvision --extra-index-url https://download.pytorch.org/whl/cu124
 torch==2.6.0+cu124

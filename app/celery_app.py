@@ -40,6 +40,7 @@ celery_app.conf.update(
 assets_dir = "assets"
 video_dir = os.path.join(assets_dir, "video")
 srt_dir = os.path.join(assets_dir, "srt")
+nvoice_dir = os.path.join(assets_dir, "nvoice")
 
 if not os.path.exists(assets_dir):
     os.makedirs(assets_dir)
@@ -47,3 +48,5 @@ if not os.path.exists(video_dir):
     os.makedirs(video_dir)
 if not os.path.exists(srt_dir):
     os.makedirs(srt_dir)
+if not os.path.exists(nvoice_dir):
+    os.makedirs(nvoice_dir)

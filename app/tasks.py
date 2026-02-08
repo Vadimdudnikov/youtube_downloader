@@ -20,11 +20,13 @@ def ensure_directories():
     assets_dir = "assets"
     video_dir = os.path.join(assets_dir, "video")
     srt_dir = os.path.join(assets_dir, "srt")
+    nvoice_dir = os.path.join(assets_dir, "nvoice")
     
     os.makedirs(video_dir, exist_ok=True)
     os.makedirs(srt_dir, exist_ok=True)
+    os.makedirs(nvoice_dir, exist_ok=True)
     
-    return video_dir, srt_dir
+    return video_dir, srt_dir, nvoice_dir
 
 
 def extract_youtube_id(url: str) -> str:
@@ -73,7 +75,7 @@ def download_video_task(self, youtube_url: str, audio_only: bool = False):
         self.update_state(state='PROGRESS', meta={'status': 'Начинаем загрузку через RapidAPI...', 'progress': 0})
         
         # Убеждаемся, что папки существуют
-        video_dir, srt_dir = ensure_directories()
+        video_dir, srt_dir, _ = ensure_directories()
         
         # Извлекаем YouTube ID для имени файла
         youtube_id = extract_youtube_id(youtube_url)
@@ -86,7 +88,7 @@ def download_video_task(self, youtube_url: str, audio_only: bool = False):
         if os.path.exists(mp3_path):
             file_size = os.path.getsize(mp3_path)
             print(f"Файл уже существует локально: {mp3_file}")
-            
+            create_no_vocals_task.delay(mp3_path)
             return {
                 'status': 'completed',
                 'progress': 100,
@@ -122,7 +124,7 @@ def download_video_task(self, youtube_url: str, audio_only: bool = False):
             state='PROGRESS',
             meta={'status': 'Загрузка завершена', 'progress': 100}
         )
-        
+        create_no_vocals_task.delay(downloaded_path)
         return {
             'status': 'completed',
             'progress': 100,
@@ -151,6 +153,82 @@ def download_video_task(self, youtube_url: str, audio_only: bool = False):
             'error': error_message,
             'exc_type': type(e).__name__
         }
+
+
+@celery_app.task(bind=True, time_limit=90 * 60, soft_time_limit=85 * 60)
+def create_no_vocals_task(self, mp3_path: str):
+    """
+    Создаёт аудио без голоса (инструментал) из MP3 через Demucs и сохраняет в папку nvoice
+    с тем же именем файла. Вызывается после успешного скачивания ролика.
+    """
+    import tempfile
+    import shutil
+    try:
+        if not os.path.exists(mp3_path):
+            raise FileNotFoundError(f"Аудио файл не найден: {mp3_path}")
+
+        video_dir, srt_dir, nvoice_dir = ensure_directories()
+        base_name = os.path.splitext(os.path.basename(mp3_path))[0]
+        out_mp3_name = f"{base_name}.mp3"
+        out_mp3_path = os.path.join(nvoice_dir, out_mp3_name)
+
+        if os.path.exists(out_mp3_path):
+            self.update_state(state='PROGRESS', meta={'status': 'Файл без голоса уже существует', 'progress': 100})
+            return {
+                'status': 'completed',
+                'message': 'Аудио без голоса уже создано',
+                'file_path': out_mp3_path,
+                'file_name': out_mp3_name,
+                'cached': True
+            }
+
+        self.update_state(state='PROGRESS', meta={'status': 'Запуск Demucs...', 'progress': 10})
+
+        with tempfile.TemporaryDirectory(prefix="demucs_") as tmp_dir:
+            # demucs --two-stems=vocals создаёт no_vocals.wav и vocals.wav
+            cmd = [
+                "demucs", "--two-stems=vocals", "-o", tmp_dir, mp3_path
+            ]
+            self.update_state(state='PROGRESS', meta={'status': 'Разделение источников (Demucs)...', 'progress': 20})
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
+            if proc.returncode != 0:
+                raise RuntimeError(f"Demucs ошибка: {proc.stderr or proc.stdout}")
+
+            # Структура: tmp_dir/htdemucs/<base_name>/no_vocals.wav
+            model_subdir = "htdemucs"
+            track_subdir = base_name
+            no_vocals_wav = os.path.join(tmp_dir, model_subdir, track_subdir, "no_vocals.wav")
+            if not os.path.exists(no_vocals_wav):
+                # попробовать другие имена (например, с суффиксом из-за точки в имени)
+                for d in os.listdir(os.path.join(tmp_dir, model_subdir)):
+                    candidate = os.path.join(tmp_dir, model_subdir, d, "no_vocals.wav")
+                    if os.path.exists(candidate):
+                        no_vocals_wav = candidate
+                        break
+                else:
+                    raise FileNotFoundError(f"Demucs не создал no_vocals.wav в {tmp_dir}")
+
+            self.update_state(state='PROGRESS', meta={'status': 'Конвертация в MP3...', 'progress': 90})
+            # Конвертируем WAV в MP3 в nvoice
+            conv = subprocess.run([
+                "ffmpeg", "-y", "-i", no_vocals_wav, "-acodec", "libmp3lame", "-q:a", "2", out_mp3_path
+            ], capture_output=True, text=True, timeout=600)
+            if conv.returncode != 0:
+                raise RuntimeError(f"FFmpeg ошибка: {conv.stderr or conv.stdout}")
+
+        self.update_state(state='PROGRESS', meta={'status': 'Готово', 'progress': 100})
+        return {
+            'status': 'completed',
+            'message': 'Аудио без голоса создано',
+            'file_path': out_mp3_path,
+            'file_name': out_mp3_name,
+            'cached': False
+        }
+    except Exception as e:
+        error_message = str(e)
+        print(f"Ошибка create_no_vocals: {error_message}")
+        self.update_state(state='FAILURE', meta={'status': 'Ошибка', 'error': error_message, 'exc_type': type(e).__name__})
+        return {'status': 'failed', 'error': error_message, 'exc_type': type(e).__name__}
 
 
 @celery_app.task(bind=True)
@@ -236,7 +314,7 @@ def transcribe_audio_task(self, audio_path: str, task_id: str = None, model_size
         # Если указан task_id, сохраняем результат в JSON файл
         if task_id:
             # Сохраняем в папку srt (для совместимости с API)
-            video_dir, srt_dir = ensure_directories()
+            video_dir, srt_dir, _ = ensure_directories()
             json_file = f"{task_id}.json"
             json_path = os.path.join(srt_dir, json_file)
             
@@ -339,7 +417,7 @@ def create_srt_from_youtube_task(self, youtube_url: str, model_size: str = "medi
     """
     try:
         # Убеждаемся, что папки существуют
-        video_dir, srt_dir = ensure_directories()
+        video_dir, srt_dir, _ = ensure_directories()
         
         # Извлекаем YouTube ID
         youtube_id = extract_youtube_id(youtube_url)

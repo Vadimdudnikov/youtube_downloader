@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, HttpUrl
 import os
@@ -120,17 +120,25 @@ async def get_download_status(task_id: str):
 
 
 @router.get("/file/{filename}")
-async def download_file(filename: str):
-    """Скачать загруженный файл"""
-    # Ищем файл в папках video и srt
+async def download_file(
+    filename: str,
+    no_vocals: Optional[bool] = Query(False, description="Скачать версию без голоса (из nvoice)")
+):
+    """Скачать загруженный файл (video, srt, nvoice). Для MP3 с тем же именем используйте ?no_vocals=true для инструментала."""
     video_path = os.path.join("assets", "video", filename)
     srt_path = os.path.join("assets", "srt", filename)
+    nvoice_path = os.path.join("assets", "nvoice", filename)
     
-    file_path = None
-    if os.path.exists(video_path):
+    if no_vocals and os.path.exists(nvoice_path):
+        file_path = nvoice_path
+    elif os.path.exists(video_path):
         file_path = video_path
     elif os.path.exists(srt_path):
         file_path = srt_path
+    elif os.path.exists(nvoice_path):
+        file_path = nvoice_path
+    else:
+        file_path = None
     
     if not file_path:
         raise HTTPException(status_code=404, detail="Файл не найден")
@@ -149,6 +157,7 @@ async def list_downloads():
         files = []
         video_dir = os.path.join("assets", "video")
         srt_dir = os.path.join("assets", "srt")
+        nvoice_dir = os.path.join("assets", "nvoice")
         
         # Собираем файлы из папки video
         if os.path.exists(video_dir):
@@ -174,6 +183,19 @@ async def list_downloads():
                         "size": file_size,
                         "type": "json" if filename.endswith('.json') else "srt",
                         "download_url": f"/api/v1/download/file/{filename}"
+                    })
+        
+        # Собираем файлы из папки nvoice (аудио без голоса)
+        if os.path.exists(nvoice_dir):
+            for filename in os.listdir(nvoice_dir):
+                file_path = os.path.join(nvoice_dir, filename)
+                if os.path.isfile(file_path):
+                    file_size = os.path.getsize(file_path)
+                    files.append({
+                        "filename": filename,
+                        "size": file_size,
+                        "type": "no_vocals",
+                        "download_url": f"/api/v1/download/file/{filename}?no_vocals=true"
                     })
         
         return {
