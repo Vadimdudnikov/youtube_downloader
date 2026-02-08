@@ -2,11 +2,15 @@ from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, HttpUrl
 import os
+from pathlib import Path
 
 from app.tasks import download_video_task, transcribe_audio_task, extract_youtube_id, create_srt_from_youtube_task
 from typing import Optional
 
 router = APIRouter()
+
+# Абсолютный путь к assets (не зависит от текущей рабочей директории процесса, важно для Docker)
+_ASSETS_DIR = Path(__file__).resolve().parent.parent.parent / "assets"
 
 
 class DownloadRequest(BaseModel):
@@ -125,17 +129,17 @@ async def download_file(
     no_vocals: Optional[bool] = Query(False, description="Скачать версию без голоса (из nvoice)")
 ):
     """Скачать загруженный файл (video, srt, nvoice). Для MP3 с тем же именем используйте ?no_vocals=true для инструментала."""
-    video_path = os.path.join("assets", "video", filename)
-    srt_path = os.path.join("assets", "srt", filename)
-    nvoice_path = os.path.join("assets", "nvoice", filename)
+    video_path = _ASSETS_DIR / "video" / filename
+    srt_path = _ASSETS_DIR / "srt" / filename
+    nvoice_path = _ASSETS_DIR / "nvoice" / filename
     
-    if no_vocals and os.path.exists(nvoice_path):
+    if no_vocals and nvoice_path.exists():
         file_path = nvoice_path
-    elif os.path.exists(video_path):
+    elif video_path.exists():
         file_path = video_path
-    elif os.path.exists(srt_path):
+    elif srt_path.exists():
         file_path = srt_path
-    elif os.path.exists(nvoice_path):
+    elif nvoice_path.exists():
         file_path = nvoice_path
     else:
         file_path = None
@@ -144,7 +148,7 @@ async def download_file(
         raise HTTPException(status_code=404, detail="Файл не найден")
     
     return FileResponse(
-        path=file_path,
+        path=str(file_path),
         filename=filename,
         media_type='application/octet-stream'
     )
@@ -155,16 +159,16 @@ async def list_downloads():
     """Получить список загруженных файлов"""
     try:
         files = []
-        video_dir = os.path.join("assets", "video")
-        srt_dir = os.path.join("assets", "srt")
-        nvoice_dir = os.path.join("assets", "nvoice")
+        video_dir = _ASSETS_DIR / "video"
+        srt_dir = _ASSETS_DIR / "srt"
+        nvoice_dir = _ASSETS_DIR / "nvoice"
         
         # Собираем файлы из папки video
-        if os.path.exists(video_dir):
+        if video_dir.exists():
             for filename in os.listdir(video_dir):
-                file_path = os.path.join(video_dir, filename)
-                if os.path.isfile(file_path):
-                    file_size = os.path.getsize(file_path)
+                file_path = video_dir / filename
+                if file_path.is_file():
+                    file_size = file_path.stat().st_size
                     files.append({
                         "filename": filename,
                         "size": file_size,
@@ -173,11 +177,11 @@ async def list_downloads():
                     })
         
         # Собираем файлы из папки srt
-        if os.path.exists(srt_dir):
+        if srt_dir.exists():
             for filename in os.listdir(srt_dir):
-                file_path = os.path.join(srt_dir, filename)
-                if os.path.isfile(file_path):
-                    file_size = os.path.getsize(file_path)
+                file_path = srt_dir / filename
+                if file_path.is_file():
+                    file_size = file_path.stat().st_size
                     files.append({
                         "filename": filename,
                         "size": file_size,
@@ -186,11 +190,11 @@ async def list_downloads():
                     })
         
         # Собираем файлы из папки nvoice (аудио без голоса)
-        if os.path.exists(nvoice_dir):
+        if nvoice_dir.exists():
             for filename in os.listdir(nvoice_dir):
-                file_path = os.path.join(nvoice_dir, filename)
-                if os.path.isfile(file_path):
-                    file_size = os.path.getsize(file_path)
+                file_path = nvoice_dir / filename
+                if file_path.is_file():
+                    file_size = file_path.stat().st_size
                     files.append({
                         "filename": filename,
                         "size": file_size,
@@ -271,12 +275,12 @@ async def get_srt_status(task_id: str):
             # Получаем YouTube ID из task_id или из результата
             youtube_id = result.get('youtube_id', task_id)
             json_file = f"{youtube_id}.json"
-            json_path = os.path.join("assets", "srt", json_file)
+            json_path = _ASSETS_DIR / "srt" / json_file
             
             # Если файл существует, добавляем информацию о нем
             file_size = None
-            if os.path.exists(json_path):
-                file_size = os.path.getsize(json_path)
+            if json_path.exists():
+                file_size = json_path.stat().st_size
             
             response = {
                 'task_id': task_id,
@@ -284,10 +288,10 @@ async def get_srt_status(task_id: str):
                 'status': 'completed',
                 'progress': 100,
                 'message': result.get('message'),
-                'file_name': json_file if os.path.exists(json_path) else None,
+                'file_name': json_file if json_path.exists() else None,
                 'file_size': file_size,
                 'segments_count': result.get('segments_count'),
-                'download_url': f"/api/v1/download/file/{json_file}" if os.path.exists(json_path) else None
+                'download_url': f"/api/v1/download/file/{json_file}" if json_path.exists() else None
             }
         else:  # FAILURE
             # Проверяем, что task.info является словарем
