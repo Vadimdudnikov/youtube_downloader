@@ -5,12 +5,21 @@ import os
 from pathlib import Path
 
 from app.tasks import download_video_task, transcribe_audio_task, extract_youtube_id, create_srt_from_youtube_task
+from app.config import settings
 from typing import Optional
 
 router = APIRouter()
 
-# Абсолютный путь к assets (не зависит от текущей рабочей директории процесса, важно для Docker)
-_ASSETS_DIR = Path(__file__).resolve().parent.parent.parent / "assets"
+
+def _get_assets_dir() -> Path:
+    """Путь к папке assets. В Docker задайте UPLOAD_DIR=/путь/к/assets (абсолютный)."""
+    raw = settings.upload_dir
+    if os.path.isabs(raw):
+        return Path(raw)
+    return Path(__file__).resolve().parent.parent.parent / raw
+
+
+_ASSETS_DIR = _get_assets_dir()
 
 
 class DownloadRequest(BaseModel):
@@ -145,7 +154,21 @@ async def download_file(
         file_path = None
     
     if not file_path:
-        raise HTTPException(status_code=404, detail="Файл не найден")
+        paths_checked = [
+            str(_ASSETS_DIR / "nvoice" / filename),
+            str(_ASSETS_DIR / "video" / filename),
+            str(_ASSETS_DIR / "srt" / filename),
+        ]
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "message": "Файл не найден",
+                "filename": filename,
+                "assets_dir": str(_ASSETS_DIR),
+                "paths_checked": paths_checked,
+                "hint": "В Docker задайте переменную окружения UPLOAD_DIR=/путь/к/папке/assets (абсолютный путь, где лежат video, srt, nvoice).",
+            },
+        )
     
     return FileResponse(
         path=str(file_path),

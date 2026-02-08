@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     }
     
     # Настройки файлов
+    # Для Docker: задайте абсолютный путь, например UPLOAD_DIR=/home/youtube_downloader/assets
     upload_dir: str = "assets"
     cookies_file: str = "cookies.txt"  # Путь к файлу cookies
     max_file_size: int = 100 * 1024 * 1024  # 100MB
