@@ -29,10 +29,15 @@ celery_app.conf.update(
             'exchange': 'transcription',
             'routing_key': 'transcription',
         },
+        'no_vocals': {
+            'exchange': 'no_vocals',
+            'routing_key': 'no_vocals',
+        },
     },
     task_routes={
         'app.tasks.transcribe_audio_task': {'queue': 'transcription'},
         'app.tasks.create_srt_from_youtube_task': {'queue': 'transcription'},
+        'app.tasks.create_no_vocals_task': {'queue': 'no_vocals'},
     },
 )
 

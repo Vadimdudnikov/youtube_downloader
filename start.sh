@@ -243,6 +243,7 @@ cleanup() {
     print_status "Останавливаем все воркеры..."
     stop_worker "youtube_download"
     stop_worker "transcription"
+    stop_worker "no_vocals"
 
     if [ ! -z "$API_PID" ]; then
         print_status "Останавливаем API (PID: $API_PID)..."
@@ -260,6 +261,7 @@ trap cleanup SIGINT SIGTERM
 print_status "Запускаем воркеры Celery..."
 start_worker "youtube_download" "download_worker"
 start_worker "transcription" "transcription_worker"
+start_worker "no_vocals" "no_vocals_worker"
 
 print_success "Все воркеры запущены"
 
