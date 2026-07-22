@@ -1,10 +1,10 @@
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, HttpUrl
+from pydantic import BaseModel, HttpUrl, model_validator
 import os
 from pathlib import Path
 
-from app.tasks import download_video_task, transcribe_audio_task, extract_youtube_id, create_srt_from_youtube_task
+from app.tasks import download_video_task, create_srt_from_youtube_task
 from app.config import settings
 from typing import Optional
 
@@ -23,8 +23,20 @@ _ASSETS_DIR = _get_assets_dir()
 
 
 class DownloadRequest(BaseModel):
-    youtube_url: HttpUrl
+    """youtube_url или url — YouTube либо прямая ссылка на медиа (playprofi и т.п.)."""
+    youtube_url: Optional[HttpUrl] = None
+    url: Optional[HttpUrl] = None
     audio_only: bool = False
+
+    @model_validator(mode="after")
+    def require_media_url(self):
+        if not self.youtube_url and not self.url:
+            raise ValueError("Укажите youtube_url или url")
+        return self
+
+    @property
+    def media_url(self) -> str:
+        return str(self.youtube_url or self.url)
 
 
 class DownloadResponse(BaseModel):
@@ -35,8 +47,19 @@ class DownloadResponse(BaseModel):
 
 
 class SRTRequest(BaseModel):
-    youtube_url: HttpUrl
+    youtube_url: Optional[HttpUrl] = None
+    url: Optional[HttpUrl] = None
     model_size: Optional[str] = "medium"  # tiny, base, small, medium, large
+
+    @model_validator(mode="after")
+    def require_media_url(self):
+        if not self.youtube_url and not self.url:
+            raise ValueError("Укажите youtube_url или url")
+        return self
+
+    @property
+    def media_url(self) -> str:
+        return str(self.youtube_url or self.url)
 
 
 class SRTResponse(BaseModel):
@@ -48,15 +71,15 @@ class SRTResponse(BaseModel):
 
 @router.post("/download", response_model=DownloadResponse)
 async def download_video(request: DownloadRequest):
-    """Загрузить видео или аудио с YouTube"""
+    """Загрузить видео/аудио: YouTube или прямая media-ссылка (например playprofi)."""
     try:
-        # Отправляем задачу в Celery
-        task = download_video_task.delay(str(request.youtube_url), request.audio_only)
-        
+        media_url = request.media_url
+        task = download_video_task.delay(media_url, request.audio_only)
+
         download_type = "аудио" if request.audio_only else "видео"
         return DownloadResponse(
             task_id=task.id,
-            youtube_url=str(request.youtube_url),
+            youtube_url=media_url,
             status="pending",
             message=f"Задача загрузки {download_type} создана"
         )
@@ -246,25 +269,24 @@ async def list_downloads():
 
 @router.post("/srt", response_model=SRTResponse)
 async def create_srt(request: SRTRequest):
-    """Создать JSON файл с субтитрами для видео с YouTube"""
+    """Создать JSON с субтитрами: YouTube или прямая media-ссылка."""
     try:
-        # Валидация размера модели
         valid_models = ["tiny", "base", "small", "medium", "large"]
         if request.model_size not in valid_models:
             raise HTTPException(
                 status_code=400,
                 detail=f"Неверный размер модели. Доступные: {', '.join(valid_models)}"
             )
-        
-        # Запускаем задачу в фоне (она сама загрузит аудио и выполнит транскрипцию)
+
+        media_url = request.media_url
         task = create_srt_from_youtube_task.delay(
-            str(request.youtube_url),
+            media_url,
             model_size=request.model_size
         )
-        
+
         return SRTResponse(
             task_id=task.id,
-            youtube_url=str(request.youtube_url),
+            youtube_url=media_url,
             status="pending",
             message="Задача создания JSON файла создана"
         )

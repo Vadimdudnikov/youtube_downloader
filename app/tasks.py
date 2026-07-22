@@ -1,11 +1,12 @@
 import os
 import subprocess
-import re
 import json
 from app.celery_app import celery_app
 from app.config import settings
 from app.rapidapi_service import RapidAPIService
 from app.whisperx_service import WhisperXService
+from app.direct_media_service import DirectMediaService
+from app.media_utils import extract_media_id, is_youtube_url
 
 import warnings
 
@@ -13,6 +14,9 @@ import warnings
 warnings.filterwarnings("ignore", category=UserWarning)
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=DeprecationWarning)
+
+# Обратная совместимость для импортов из routers
+extract_youtube_id = extract_media_id
 
 
 def ensure_directories():
@@ -29,62 +33,98 @@ def ensure_directories():
     return video_dir, srt_dir, nvoice_dir
 
 
-def extract_youtube_id(url: str) -> str:
-    """Извлекаем YouTube ID из URL"""
-    patterns = [
-        r'(?:youtube\.com/watch\?v=|youtu\.be/|youtube\.com/embed/)([a-zA-Z0-9_-]{11})',
-        r'youtube\.com/v/([a-zA-Z0-9_-]{11})',
-        r'youtube\.com/shorts/([a-zA-Z0-9_-]{11})'
-    ]
-    
-    for pattern in patterns:
-        match = re.search(pattern, url)
-        if match:
-            return match.group(1)
-    
-    # Если не удалось извлечь ID, используем хеш от URL
-    import hashlib
-    return hashlib.md5(url.encode()).hexdigest()[:11]
+def _ensure_ffmpeg():
+    try:
+        subprocess.run(['ffmpeg', '-version'], capture_output=True, check=True)
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        raise RuntimeError('FFmpeg не найден. Установите FFmpeg для конвертации аудио в MP3.')
 
 
 @celery_app.task(bind=True)
 def download_video_task(self, youtube_url: str, audio_only: bool = False):
     """
-    Задача для загрузки аудио с YouTube через RapidAPI
+    Задача для загрузки медиа в MP3 (стандартная схема):
+    - YouTube → RapidAPI
+    - Прямые ссылки (mp4 playprofi и т.п.) → скачать → конвертировать в MP3 → no_vocals
     """
     try:
-        # RapidAPI поддерживает только аудио
+        media_url = youtube_url
+        media_id = extract_media_id(media_url)
+        print(f"Media ID: {media_id} | YouTube={is_youtube_url(media_url)}")
+
+        video_dir, srt_dir, _ = ensure_directories()
+        mp3_file = f"{media_id}.mp3"
+        mp3_path = os.path.join(video_dir, mp3_file)
+
+        # ---------- Прямые медиа-ссылки (mp4 и т.п.) → всегда в MP3 ----------
+        if not is_youtube_url(media_url):
+            _ensure_ffmpeg()
+            self.update_state(
+                state='PROGRESS',
+                meta={'status': 'Начинаем загрузку прямой ссылки...', 'progress': 0}
+            )
+
+            if os.path.exists(mp3_path):
+                file_size = os.path.getsize(mp3_path)
+                print(f"Файл уже существует локально: {mp3_file}")
+                create_no_vocals_task.delay(mp3_path)
+                return {
+                    'status': 'completed',
+                    'progress': 100,
+                    'message': 'Аудио найдено локально (пропущена загрузка)',
+                    'file_path': mp3_path,
+                    'file_name': mp3_file,
+                    'file_size': file_size,
+                    'download_type': 'аудио',
+                    'youtube_id': media_id,
+                    'cached': True,
+                    'source': 'direct',
+                }
+
+            self.update_state(
+                state='PROGRESS',
+                meta={'status': 'Скачиваем mp4 и конвертируем в MP3...', 'progress': 20}
+            )
+            service = DirectMediaService()
+            result = service.download_media(
+                url=media_url,
+                video_path=os.path.join(video_dir, f"{media_id}.mp4"),
+                audio_path=mp3_path,
+                audio_only=True,
+            )
+            file_size = os.path.getsize(result['file_path'])
+            print(f"✅ Аудио успешно загружено: {mp3_file} ({file_size / 1024 / 1024:.2f} МБ)")
+
+            self.update_state(
+                state='PROGRESS',
+                meta={'status': 'Загрузка завершена', 'progress': 100}
+            )
+            create_no_vocals_task.delay(result['file_path'])
+            return {
+                'status': 'completed',
+                'progress': 100,
+                'message': 'Аудио успешно загружено по прямой ссылке (mp4→mp3)',
+                'file_path': result['file_path'],
+                'file_name': result['file_name'],
+                'file_size': file_size,
+                'download_type': 'аудио',
+                'youtube_id': media_id,
+                'cached': False,
+                'source': 'direct',
+            }
+
+        # ---------- YouTube через RapidAPI (только аудио) ----------
         if not audio_only:
             return {
                 'status': 'failed',
-                'error': 'RapidAPI поддерживает только загрузку аудио. Используйте audio_only=True.',
+                'error': 'Для YouTube поддерживается только загрузка аудио. Используйте audio_only=True.',
                 'exc_type': 'UnsupportedOperation'
             }
-        
-        # Проверяем FFmpeg для аудио конвертации
-        try:
-            subprocess.run(['ffmpeg', '-version'], capture_output=True, check=True)
-        except (subprocess.CalledProcessError, FileNotFoundError):
-            return {
-                'status': 'failed',
-                'error': 'FFmpeg не найден. Установите FFmpeg для конвертации аудио в MP3.',
-                'exc_type': 'FFmpegNotFound'
-            }
-        
-        # Обновляем статус задачи
+
+        _ensure_ffmpeg()
+
         self.update_state(state='PROGRESS', meta={'status': 'Начинаем загрузку через RapidAPI...', 'progress': 0})
-        
-        # Убеждаемся, что папки существуют
-        video_dir, srt_dir, _ = ensure_directories()
-        
-        # Извлекаем YouTube ID для имени файла
-        youtube_id = extract_youtube_id(youtube_url)
-        print(f"YouTube ID: {youtube_id}")
-        
-        # Проверяем, есть ли файл уже локально
-        mp3_file = f"{youtube_id}.mp3"
-        mp3_path = os.path.join(video_dir, mp3_file)
-        
+
         if os.path.exists(mp3_path):
             file_size = os.path.getsize(mp3_path)
             print(f"Файл уже существует локально: {mp3_file}")
@@ -97,29 +137,28 @@ def download_video_task(self, youtube_url: str, audio_only: bool = False):
                 'file_name': mp3_file,
                 'file_size': file_size,
                 'download_type': 'аудио',
-                'youtube_id': youtube_id,
-                'cached': True
+                'youtube_id': media_id,
+                'cached': True,
+                'source': 'youtube',
             }
-        
-        # Инициализируем RapidAPI сервис
+
         self.update_state(state='PROGRESS', meta={'status': 'Подключаемся к RapidAPI...', 'progress': 10})
         rapidapi = RapidAPIService()
-        
-        # Скачиваем аудио через RapidAPI
+
         self.update_state(state='PROGRESS', meta={'status': 'Скачиваем аудио через RapidAPI...', 'progress': 20})
-        print(f"Начинаем загрузку аудио через RapidAPI для {youtube_url}")
-        
+        print(f"Начинаем загрузку аудио через RapidAPI для {media_url}")
+
         downloaded_path = rapidapi.download_youtube_audio(
-            url=youtube_url,
+            url=media_url,
             output_path=mp3_path
         )
-        
+
         if not os.path.exists(downloaded_path):
             raise Exception(f"Файл не был создан после загрузки: {downloaded_path}")
-        
+
         file_size = os.path.getsize(downloaded_path)
         print(f"✅ Аудио успешно загружено: {mp3_file} ({file_size / 1024 / 1024:.2f} МБ)")
-        
+
         self.update_state(
             state='PROGRESS',
             meta={'status': 'Загрузка завершена', 'progress': 100}
@@ -133,17 +172,18 @@ def download_video_task(self, youtube_url: str, audio_only: bool = False):
             'file_name': mp3_file,
             'file_size': file_size,
             'download_type': 'аудио',
-            'youtube_id': youtube_id,
-            'cached': False
+            'youtube_id': media_id,
+            'cached': False,
+            'source': 'youtube',
         }
-                
+
     except Exception as e:
         error_message = str(e)
-        print(f"Ошибка загрузки через RapidAPI: {error_message}")
+        print(f"Ошибка загрузки: {error_message}")
         self.update_state(
             state='FAILURE',
             meta={
-                'status': 'Ошибка загрузки', 
+                'status': 'Ошибка загрузки',
                 'error': error_message,
                 'exc_type': type(e).__name__
             }
@@ -408,33 +448,32 @@ def transcribe_audio_task(self, audio_path: str, task_id: str = None, model_size
 @celery_app.task(bind=True)
 def create_srt_from_youtube_task(self, youtube_url: str, model_size: str = "medium"):
     """
-    Задача для создания JSON файла с субтитрами из YouTube URL
-    Выполняет загрузку аудио (если нужно) и транскрипцию последовательно
-    
+    Задача для создания JSON файла с субтитрами из медиа URL
+    (YouTube или прямая ссылка на видео, например playprofi).
+    Выполняет загрузку аудио (если нужно) и транскрипцию последовательно.
+
     Args:
-        youtube_url: URL видео на YouTube
+        youtube_url: URL видео (YouTube или прямой media URL)
         model_size: Размер модели WhisperX (tiny, base, small, medium, large)
     """
     try:
-        # Убеждаемся, что папки существуют
         video_dir, srt_dir, _ = ensure_directories()
-        
-        # Извлекаем YouTube ID
-        youtube_id = extract_youtube_id(youtube_url)
-        print(f"Создание JSON субтитров для YouTube ID: {youtube_id}")
-        
-        # Проверяем, существует ли уже JSON файл
-        json_file = f"{youtube_id}.json"
+
+        media_url = youtube_url
+        media_id = extract_media_id(media_url)
+        print(f"Создание JSON субтитров для Media ID: {media_id} (source={'youtube' if is_youtube_url(media_url) else 'direct'})")
+
+        json_file = f"{media_id}.json"
         json_path = os.path.join(srt_dir, json_file)
-        
+
         if os.path.exists(json_path):
             self.update_state(
                 state='PROGRESS',
                 meta={'status': 'JSON файл уже существует', 'progress': 100}
             )
-            
+
             file_size = os.path.getsize(json_path)
-            
+
             return {
                 'status': 'completed',
                 'progress': 100,
@@ -442,69 +481,74 @@ def create_srt_from_youtube_task(self, youtube_url: str, model_size: str = "medi
                 'file_path': json_path,
                 'file_name': json_file,
                 'file_size': file_size,
-                'youtube_id': youtube_id,
+                'youtube_id': media_id,
                 'cached': True
             }
-        
-        # Проверяем наличие аудио файла
-        audio_file = f"{youtube_id}.mp3"
+
+        audio_file = f"{media_id}.mp3"
         audio_path = os.path.join(video_dir, audio_file)
         audio_exists = os.path.exists(audio_path)
-        
-        # Если аудио нет, скачиваем его
+
+        # Если есть только видео (прямая ссылка скачана как mp4) — извлекаем аудио
+        video_path = os.path.join(video_dir, f"{media_id}.mp4")
+        if not audio_exists and os.path.exists(video_path):
+            self.update_state(
+                state='PROGRESS',
+                meta={'status': 'Извлекаем аудио из локального видео...', 'progress': 15}
+            )
+            _ensure_ffmpeg()
+            DirectMediaService().extract_audio_to_mp3(video_path, audio_path)
+            audio_exists = True
+            print(f"Аудио извлечено из локального видео: {audio_file}")
+
         if not audio_exists:
             self.update_state(
                 state='PROGRESS',
                 meta={'status': 'Аудио не найдено. Загружаем аудио...', 'progress': 10}
             )
-            
-            print(f"Аудио файл не найден. Загружаем аудио для {youtube_url}")
-            
-            # Запускаем задачу загрузки аудио синхронно (внутри задачи)
-            download_result = download_video_task.apply(args=[youtube_url, True])
-            
+
+            print(f"Аудио файл не найден. Загружаем аудио для {media_url}")
+
+            download_result = download_video_task.apply(args=[media_url, True])
+
             if download_result.successful():
                 result = download_result.result
                 if isinstance(result, dict) and result.get('status') == 'failed':
                     raise Exception(f"Ошибка загрузки аудио: {result.get('error', 'Неизвестная ошибка')}")
             else:
                 raise Exception(f"Ошибка загрузки аудио: {str(download_result.info)}")
-            
-            # Проверяем, что файл появился
+
             if not os.path.exists(audio_path):
                 raise Exception("Аудио файл не был создан после загрузки")
-            
+
             print(f"Аудио успешно загружено: {audio_file}")
         else:
             print(f"Используем существующий аудио файл: {audio_file}")
-        
-        # Запускаем транскрипцию
+
         self.update_state(
             state='PROGRESS',
             meta={'status': 'Начинаем транскрипцию...', 'progress': 50}
         )
-        
-        # Используем transcribe_audio_task для транскрипции
+
         transcription_result = transcribe_audio_task.apply(
-            args=[audio_path, youtube_id, model_size]
+            args=[audio_path, media_id, model_size]
         )
-        
+
         if transcription_result.successful():
             result = transcription_result.result
             if isinstance(result, dict) and result.get('status') == 'failed':
                 raise Exception(f"Ошибка транскрипции: {result.get('error', 'Неизвестная ошибка')}")
-            
-            # Проверяем, что JSON файл создан
+
             if not os.path.exists(json_path):
                 raise Exception("JSON файл не был создан после транскрипции")
-            
+
             file_size = os.path.getsize(json_path)
-            
+
             self.update_state(
                 state='PROGRESS',
                 meta={'status': 'JSON файл создан успешно', 'progress': 100}
             )
-            
+
             return {
                 'status': 'completed',
                 'progress': 100,
@@ -512,13 +556,11 @@ def create_srt_from_youtube_task(self, youtube_url: str, model_size: str = "medi
                 'file_path': json_path,
                 'file_name': json_file,
                 'file_size': file_size,
-                'youtube_id': youtube_id,
+                'youtube_id': media_id,
                 'cached': False,
                 'audio_cached': audio_exists
             }
         else:
-            # Задача транскрипции завершилась с ошибкой
-            # Извлекаем информацию об ошибке из task.info
             error_info = transcription_result.info
             if isinstance(error_info, dict):
                 error_message = error_info.get('error', 'Неизвестная ошибка транскрипции')
@@ -526,13 +568,13 @@ def create_srt_from_youtube_task(self, youtube_url: str, model_size: str = "medi
                 error_message = str(error_info)
             else:
                 error_message = str(error_info) if error_info else 'Неизвестная ошибка транскрипции'
-            
+
             raise Exception(f"Ошибка транскрипции: {error_message}")
-        
+
     except Exception as e:
         error_message = str(e)
         print(f"Ошибка создания JSON: {error_message}")
-        
+
         self.update_state(
             state='FAILURE',
             meta={
@@ -541,7 +583,7 @@ def create_srt_from_youtube_task(self, youtube_url: str, model_size: str = "medi
                 'exc_type': type(e).__name__
             }
         )
-        
+
         return {
             'status': 'failed',
             'error': error_message,
