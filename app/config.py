@@ -31,9 +31,19 @@ class Settings(BaseSettings):
     whisperx_model: str = "medium"  # Модель WhisperX (tiny, base, small, medium, large)
     chunk_duration_minutes: int = 10  # Длительность чанка для больших файлов в минутах
     tmp_dir: str = "assets/tmp"  # Временная директория для задач
+
+    # Транскрипция: whisperx (локально) или openai (API)
+    transcription_provider: str = "whisperx"
+    openai_api_key: str = ""
+    # gpt-4o-transcribe-diarize — лучшая модель с сегментами и таймкодами для SRT
+    openai_transcription_model: str = "gpt-4o-transcribe-diarize"
+    openai_chunk_duration_minutes: int = 8  # длинные файлы режем, чтобы не упереться в 25 МБ / таймауты
+    openai_chunk_overlap_seconds: int = 3
     
     class Config:
         case_sensitive = False
+        env_file = ".env"
+        extra = "ignore"
 
 
 settings = Settings()

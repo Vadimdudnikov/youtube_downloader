@@ -6,6 +6,7 @@ from app.config import settings
 from app.rapidapi_service import RapidAPIService
 from app.whisperx_service import WhisperXService
 from app.direct_media_service import DirectMediaService
+from app.openai_whisper_service import OpenAIWhisperService, segments_to_srt
 from app.media_utils import extract_media_id, is_youtube_url
 
 import warnings
@@ -588,4 +589,196 @@ def create_srt_from_youtube_task(self, youtube_url: str, model_size: str = "medi
             'status': 'failed',
             'error': error_message,
             'exc_type': type(e).__name__
+        }
+
+
+def _ensure_audio_for_media(self, media_url: str, media_id: str, video_dir: str):
+    """Скачивает/извлекает mp3 для медиа URL. Не меняет старую WhisperX-задачу."""
+    audio_file = f"{media_id}.mp3"
+    audio_path = os.path.join(video_dir, audio_file)
+    audio_exists = os.path.exists(audio_path)
+
+    video_path = os.path.join(video_dir, f"{media_id}.mp4")
+    if not audio_exists and os.path.exists(video_path):
+        self.update_state(
+            state='PROGRESS',
+            meta={'status': 'Извлекаем аудио из локального видео...', 'progress': 15}
+        )
+        _ensure_ffmpeg()
+        DirectMediaService().extract_audio_to_mp3(video_path, audio_path)
+        audio_exists = True
+        print(f"Аудио извлечено из локального видео: {audio_file}")
+
+    if not audio_exists:
+        self.update_state(
+            state='PROGRESS',
+            meta={'status': 'Аудио не найдено. Загружаем аудио...', 'progress': 10}
+        )
+        print(f"Аудио файл не найден. Загружаем аудио для {media_url}")
+        download_result = download_video_task.apply(args=[media_url, True])
+        if download_result.successful():
+            result = download_result.result
+            if isinstance(result, dict) and result.get('status') == 'failed':
+                raise Exception(f"Ошибка загрузки аудио: {result.get('error', 'Неизвестная ошибка')}")
+        else:
+            raise Exception(f"Ошибка загрузки аудио: {str(download_result.info)}")
+        if not os.path.exists(audio_path):
+            raise Exception("Аудио файл не был создан после загрузки")
+        print(f"Аудио успешно загружено: {audio_file}")
+    else:
+        print(f"Используем существующий аудио файл: {audio_file}")
+
+    return audio_path, audio_exists
+
+
+@celery_app.task(bind=True, time_limit=4 * 60 * 60, soft_time_limit=3 * 60 * 60 + 50 * 60)
+def transcribe_audio_openai_task(self, audio_path: str, task_id: str = None):
+    """Транскрипция через OpenAI API. Сохраняет JSON и SRT в assets/srt."""
+    try:
+        print(f"🎤 OpenAI транскрипция: {audio_path}")
+        self.update_state(
+            state='PROGRESS',
+            meta={'status': 'Отправляем аудио в OpenAI...', 'progress': 20}
+        )
+
+        if not os.path.exists(audio_path):
+            raise FileNotFoundError(f"Аудио файл не найден: {audio_path}")
+
+        service = OpenAIWhisperService()
+        segments = service.transcribe_audio(audio_path)
+
+        if not segments:
+            raise Exception("OpenAI не смог распознать речь в аудио файле (0 сегментов)")
+
+        if task_id:
+            _, srt_dir, _ = ensure_directories()
+            json_path = os.path.join(srt_dir, f"{task_id}.json")
+            srt_path = os.path.join(srt_dir, f"{task_id}.srt")
+
+            json_data = [
+                {
+                    'start': segment.get('start', 0),
+                    'end': segment.get('end', 0),
+                    'text': segment.get('text', '').strip(),
+                }
+                for segment in segments
+            ]
+            with open(json_path, 'w', encoding='utf-8') as f:
+                json.dump(json_data, f, ensure_ascii=False, indent=4)
+            with open(srt_path, 'w', encoding='utf-8') as f:
+                f.write(segments_to_srt(json_data))
+            print(f"✅ OpenAI результат: {json_path}, {srt_path}")
+
+        self.update_state(
+            state='PROGRESS',
+            meta={'status': f'Транскрипция завершена: {len(segments)} сегментов', 'progress': 100}
+        )
+        return {
+            'status': 'success',
+            'segments': segments,
+            'message': f'Транскрипция OpenAI завершена: {len(segments)} сегментов',
+            'segments_count': len(segments),
+            'youtube_id': task_id if task_id else None,
+            'provider': 'openai',
+            'model': settings.openai_transcription_model,
+            'file_name': f"{task_id}.json" if task_id else None,
+            'srt_file_name': f"{task_id}.srt" if task_id else None,
+        }
+    except Exception as e:
+        error_message = str(e)
+        print(f"❌ Ошибка OpenAI транскрипции: {error_message}")
+        self.update_state(
+            state='FAILURE',
+            meta={
+                'status': 'Ошибка транскрипции OpenAI',
+                'error': error_message,
+                'exc_type': type(e).__name__,
+            }
+        )
+        raise
+
+
+@celery_app.task(bind=True, time_limit=4 * 60 * 60, soft_time_limit=3 * 60 * 60 + 50 * 60)
+def create_srt_openai_task(self, youtube_url: str):
+    """Создаёт JSON+SRT через OpenAI API (скачивание как в старой схеме)."""
+    try:
+        video_dir, srt_dir, _ = ensure_directories()
+        media_url = youtube_url
+        media_id = extract_media_id(media_url)
+        print(f"OpenAI SRT для Media ID: {media_id}")
+
+        json_file = f"{media_id}.json"
+        srt_file = f"{media_id}.srt"
+        json_path = os.path.join(srt_dir, json_file)
+        srt_path = os.path.join(srt_dir, srt_file)
+
+        if os.path.exists(json_path) and os.path.exists(srt_path):
+            file_size = os.path.getsize(json_path)
+            return {
+                'status': 'completed',
+                'progress': 100,
+                'message': 'JSON и SRT уже существуют',
+                'file_path': json_path,
+                'file_name': json_file,
+                'srt_file_name': srt_file,
+                'file_size': file_size,
+                'youtube_id': media_id,
+                'cached': True,
+                'provider': 'openai',
+            }
+
+        audio_path, audio_exists = _ensure_audio_for_media(self, media_url, media_id, video_dir)
+
+        self.update_state(
+            state='PROGRESS',
+            meta={'status': 'Начинаем транскрипцию через OpenAI...', 'progress': 50}
+        )
+
+        transcription_result = transcribe_audio_openai_task.apply(args=[audio_path, media_id])
+        if transcription_result.successful():
+            result = transcription_result.result or {}
+            if isinstance(result, dict) and result.get('status') == 'failed':
+                raise Exception(f"Ошибка транскрипции: {result.get('error', 'Неизвестная ошибка')}")
+            if not os.path.exists(json_path):
+                raise Exception("JSON файл не был создан после транскрипции OpenAI")
+
+            file_size = os.path.getsize(json_path)
+            return {
+                'status': 'completed',
+                'progress': 100,
+                'message': result.get('message', 'JSON и SRT успешно созданы через OpenAI'),
+                'file_path': json_path,
+                'file_name': json_file,
+                'srt_file_name': srt_file if os.path.exists(srt_path) else None,
+                'file_size': file_size,
+                'youtube_id': media_id,
+                'segments_count': result.get('segments_count'),
+                'cached': False,
+                'audio_cached': audio_exists,
+                'provider': 'openai',
+                'model': settings.openai_transcription_model,
+            }
+
+        error_info = transcription_result.info
+        if isinstance(error_info, dict):
+            error_message = error_info.get('error', 'Неизвестная ошибка транскрипции')
+        else:
+            error_message = str(error_info) if error_info else 'Неизвестная ошибка транскрипции'
+        raise Exception(f"Ошибка транскрипции: {error_message}")
+
+    except Exception as e:
+        error_message = str(e)
+        print(f"Ошибка создания SRT через OpenAI: {error_message}")
+        self.update_state(
+            state='FAILURE',
+            meta={
+                'status': 'Ошибка создания SRT через OpenAI',
+                'error': error_message,
+                'exc_type': type(e).__name__,
+            }
+        )
+        return {
+            'status': 'failed',
+            'error': error_message,
+            'exc_type': type(e).__name__,
         }

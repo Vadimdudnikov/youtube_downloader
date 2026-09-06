@@ -9,3 +9,12 @@ COOKIES_FILE=cookies.txt
 
 # Настройки приложения
 DEBUG=false
+
+# Транскрипция: whisperx (локально, старая логика) или openai (новый API)
+TRANSCRIPTION_PROVIDER=whisperx
+OPENAI_API_KEY=
+# Лучшая модель OpenAI с таймкодами для SRT
+OPENAI_TRANSCRIPTION_MODEL=gpt-4o-transcribe-diarize
+# Нарезка длинных файлов (лимит API 25 МБ)
+OPENAI_CHUNK_DURATION_MINUTES=8
+OPENAI_CHUNK_OVERLAP_SECONDS=3

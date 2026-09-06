@@ -4,7 +4,7 @@ from pydantic import BaseModel, HttpUrl, model_validator
 import os
 from pathlib import Path
 
-from app.tasks import download_video_task, create_srt_from_youtube_task
+from app.tasks import download_video_task, create_srt_from_youtube_task, create_srt_openai_task
 from app.config import settings
 from typing import Optional
 
@@ -267,10 +267,25 @@ async def list_downloads():
         raise HTTPException(status_code=400, detail=f"Ошибка получения списка: {str(e)}")
 
 
+def _use_openai_srt() -> bool:
+    return (settings.transcription_provider or "").strip().lower() == "openai"
+
+
 @router.post("/srt", response_model=SRTResponse)
 async def create_srt(request: SRTRequest):
-    """Создать JSON с субтитрами: YouTube или прямая media-ссылка."""
+    """Создать субтитры. Провайдер берётся из TRANSCRIPTION_PROVIDER (whisperx|openai)."""
     try:
+        media_url = request.media_url
+
+        if _use_openai_srt():
+            task = create_srt_openai_task.delay(media_url)
+            return SRTResponse(
+                task_id=task.id,
+                youtube_url=media_url,
+                status="pending",
+                message="Задача создания SRT через OpenAI создана"
+            )
+
         valid_models = ["tiny", "base", "small", "medium", "large"]
         if request.model_size not in valid_models:
             raise HTTPException(
@@ -278,7 +293,6 @@ async def create_srt(request: SRTRequest):
                 detail=f"Неверный размер модели. Доступные: {', '.join(valid_models)}"
             )
 
-        media_url = request.media_url
         task = create_srt_from_youtube_task.delay(
             media_url,
             model_size=request.model_size
@@ -292,6 +306,22 @@ async def create_srt(request: SRTRequest):
         )
     except HTTPException:
         raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Ошибка создания задачи: {str(e)}")
+
+
+@router.post("/srt/openai", response_model=SRTResponse)
+async def create_srt_openai(request: SRTRequest):
+    """Создать JSON+SRT через OpenAI API (независимо от TRANSCRIPTION_PROVIDER)."""
+    try:
+        media_url = request.media_url
+        task = create_srt_openai_task.delay(media_url)
+        return SRTResponse(
+            task_id=task.id,
+            youtube_url=media_url,
+            status="pending",
+            message="Задача создания SRT через OpenAI создана"
+        )
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Ошибка создания задачи: {str(e)}")
 
@@ -330,8 +360,10 @@ async def get_srt_status(task_id: str):
             
             # Получаем YouTube ID из task_id или из результата
             youtube_id = result.get('youtube_id', task_id)
-            json_file = f"{youtube_id}.json"
+            json_file = result.get('file_name') or f"{youtube_id}.json"
+            srt_file = result.get('srt_file_name') or f"{youtube_id}.srt"
             json_path = _ASSETS_DIR / "srt" / json_file
+            srt_path = _ASSETS_DIR / "srt" / srt_file
             
             # Если файл существует, добавляем информацию о нем
             file_size = None
@@ -347,7 +379,11 @@ async def get_srt_status(task_id: str):
                 'file_name': json_file if json_path.exists() else None,
                 'file_size': file_size,
                 'segments_count': result.get('segments_count'),
-                'download_url': f"/api/v1/download/file/{json_file}" if json_path.exists() else None
+                'download_url': f"/api/v1/download/file/{json_file}" if json_path.exists() else None,
+                'srt_file_name': srt_file if srt_path.exists() else None,
+                'srt_download_url': f"/api/v1/download/file/{srt_file}" if srt_path.exists() else None,
+                'provider': result.get('provider'),
+                'model': result.get('model'),
             }
         else:  # FAILURE
             # Проверяем, что task.info является словарем
@@ -370,5 +406,11 @@ async def get_srt_status(task_id: str):
         return response
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Ошибка получения статуса: {str(e)}")
+
+
+@router.get("/srt/openai/status/{task_id}")
+async def get_srt_openai_status(task_id: str):
+    """Статус задачи OpenAI SRT (тот же формат, что /srt/status)."""
+    return await get_srt_status(task_id)
 
 
