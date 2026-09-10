@@ -13,8 +13,8 @@ DEBUG=false
 # Транскрипция: whisperx (локально, старая логика) или openai (новый API)
 TRANSCRIPTION_PROVIDER=whisperx
 OPENAI_API_KEY=
-# Лучшая модель OpenAI с таймкодами для SRT
-OPENAI_TRANSCRIPTION_MODEL=gpt-4o-transcribe-diarize
+# whisper-1 — сегменты по предложениям, как у WhisperX
+OPENAI_TRANSCRIPTION_MODEL=whisper-1
 # Нарезка длинных файлов (лимит API 25 МБ)
 OPENAI_CHUNK_DURATION_MINUTES=8
 OPENAI_CHUNK_OVERLAP_SECONDS=3

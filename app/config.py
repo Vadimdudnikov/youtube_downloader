@@ -35,8 +35,8 @@ class Settings(BaseSettings):
     # Транскрипция: whisperx (локально) или openai (API)
     transcription_provider: str = "whisperx"
     openai_api_key: str = ""
-    # gpt-4o-transcribe-diarize — лучшая модель с сегментами и таймкодами для SRT
-    openai_transcription_model: str = "gpt-4o-transcribe-diarize"
+    # whisper-1 сам отдаёт сегменты по предложениям, как WhisperX
+    openai_transcription_model: str = "whisper-1"
     openai_chunk_duration_minutes: int = 8  # длинные файлы режем, чтобы не упереться в 25 МБ / таймауты
     openai_chunk_overlap_seconds: int = 3
     

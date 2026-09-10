@@ -1,10 +1,11 @@
 """Транскрипция аудио через OpenAI Audio API (без изменения WhisperX)."""
 
 import os
+import re
 import subprocess
 import tempfile
 import time
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 
 import requests
 
@@ -49,7 +50,7 @@ class OpenAIWhisperService:
     Транскрипция через OpenAI.
 
     Длинные файлы всегда режутся на чанки (лимит API 25 МБ и таймауты).
-    По умолчанию gpt-4o-transcribe-diarize — модель с сегментами и таймкодами.
+    По умолчанию whisper-1: сам отдаёт сегменты по предложениям, как WhisperX.
     """
 
     def __init__(self, api_key: Optional[str] = None, model: Optional[str] = None):
