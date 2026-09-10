@@ -13,8 +13,13 @@ from app.config import settings
 
 
 OPENAI_TRANSCRIPTIONS_URL = "https://api.openai.com/v1/audio/transcriptions"
-# Лимит OpenAI — 25 МБ, оставляем запас
 MAX_UPLOAD_BYTES = 24 * 1024 * 1024
+
+_ABBREVIATIONS = {
+    "mr", "mrs", "ms", "dr", "prof", "sr", "jr", "vs", "etc", "eg", "ie",
+    "т.д", "т.п", "ул", "г", "рис", "стр",
+}
+_SENTENCE_END = re.compile(r'[.!?…]["»”’)\]]*$')
 
 
 def segments_to_srt(segments: List[Dict]) -> str:
@@ -45,12 +50,79 @@ def _srt_ts(seconds: float) -> str:
     return f"{hours:02d}:{minutes:02d}:{secs:02d},{ms:03d}"
 
 
+def _join_words(words: List[Dict]) -> str:
+    parts = []
+    for item in words:
+        token = (item.get("word") or item.get("text") or "")
+        if not token:
+            continue
+        if parts and not token.startswith((" ", "\n")) and not parts[-1].endswith(" "):
+            if token[0] in ",.;:!?…)]}":
+                parts.append(token)
+            else:
+                parts.append(" " + token)
+        else:
+            parts.append(token)
+    return re.sub(r"\s+", " ", "".join(parts)).strip()
+
+
+def _is_sentence_end(word: str, next_word: Optional[str]) -> bool:
+    token = (word or "").strip()
+    if not token or not _SENTENCE_END.search(token):
+        return False
+    core = re.sub(r'["»”’)\]]+$', "", token)
+    if re.fullmatch(r"\d+\.", core):
+        return False
+    stem = core.rstrip(".…").lower().replace(".", "")
+    if stem in _ABBREVIATIONS:
+        return False
+    if next_word:
+        nxt = next_word.strip()
+        if nxt and nxt[0].islower():
+            return False
+    return True
+
+
+def group_words_into_sentences(words: List[Dict]) -> List[Dict]:
+    """Группирует слова OpenAI в предложения. start/end — реальные word-таймкоды."""
+    sentences: List[Dict] = []
+    current: List[Dict] = []
+
+    for index, item in enumerate(words):
+        token = (item.get("word") or item.get("text") or "").strip()
+        if not token:
+            continue
+        current.append(item)
+        nxt = None
+        if index + 1 < len(words):
+            nxt = words[index + 1].get("word") or words[index + 1].get("text")
+        if _is_sentence_end(token, nxt):
+            text = _join_words(current)
+            if text:
+                sentences.append({
+                    "start": float(current[0].get("start", 0)),
+                    "end": float(current[-1].get("end", current[-1].get("start", 0))),
+                    "text": text,
+                })
+            current = []
+
+    if current:
+        text = _join_words(current)
+        if text:
+            sentences.append({
+                "start": float(current[0].get("start", 0)),
+                "end": float(current[-1].get("end", current[-1].get("start", 0))),
+                "text": text,
+            })
+    return sentences
+
+
 class OpenAIWhisperService:
     """
     Транскрипция через OpenAI.
 
-    Длинные файлы всегда режутся на чанки (лимит API 25 МБ и таймауты).
-    По умолчанию whisper-1: сам отдаёт сегменты по предложениям, как WhisperX.
+    Длинные файлы режутся на чанки (лимит 25 МБ).
+    whisper-1 отдаёт слова с таймкодами — из них собираются предложения.
     """
 
     def __init__(self, api_key: Optional[str] = None, model: Optional[str] = None):
@@ -73,24 +145,30 @@ class OpenAIWhisperService:
         )
 
         if duration <= self.chunk_seconds and os.path.getsize(audio_path) <= MAX_UPLOAD_BYTES:
-            raw_segments = self._transcribe_file(audio_path)
+            _, words = self._transcribe_file(audio_path)
         else:
             print(
                 f"  Длинное аудио — режем на чанки по {self.chunk_seconds}s "
                 f"(overlap {self.overlap_seconds}s)"
             )
-            raw_segments = self._transcribe_by_duration(audio_path, duration)
+            _, words = self._transcribe_by_duration(audio_path, duration)
 
+        if not words:
+            raise RuntimeError(
+                "OpenAI не вернул word-таймкоды. Для нарезки по предложениям нужен whisper-1."
+            )
+
+        segments = group_words_into_sentences(words)
         segments = [
             {
                 "start": round(float(s.get("start", 0)), 3),
                 "end": round(float(s.get("end", 0)), 3),
                 "text": (s.get("text") or "").strip(),
             }
-            for s in raw_segments
+            for s in segments
             if (s.get("text") or "").strip()
         ]
-        print(f"✅ OpenAI: {len(segments)} сегментов")
+        print(f"✅ OpenAI: {len(segments)} предложений из {len(words)} слов")
         return segments
 
     def _probe_duration(self, audio_path: str) -> float:
@@ -109,8 +187,9 @@ class OpenAIWhisperService:
             pass
         raise RuntimeError(f"Не удалось определить длительность аудио: {result.stderr or result.stdout}")
 
-    def _transcribe_by_duration(self, audio_path: str, duration: float) -> List[Dict]:
+    def _transcribe_by_duration(self, audio_path: str, duration: float) -> Tuple[List[Dict], List[Dict]]:
         all_segments: List[Dict] = []
+        all_words: List[Dict] = []
         step = max(30, self.chunk_seconds - self.overlap_seconds)
         starts = []
         cursor = 0.0
@@ -125,22 +204,27 @@ class OpenAIWhisperService:
         for index, start in enumerate(starts, start=1):
             length = min(self.chunk_seconds, max(0.5, duration - start))
             print(f"  Чанк {index}/{total}: {start:.1f}s + {length:.1f}s")
-            chunk_segments = self._transcribe_window(audio_path, start, length)
+            chunk_segments, chunk_words = self._transcribe_window(audio_path, start, length)
             for segment in chunk_segments:
                 abs_start = float(segment.get("start", 0)) + start
                 abs_end = float(segment.get("end", 0)) + start
-                # Дубли из overlap оставляем предыдущему чанку
                 if start > 0 and abs_start < start + self.overlap_seconds:
                     continue
                 segment["start"] = abs_start
                 segment["end"] = abs_end
                 all_segments.append(segment)
-        return all_segments
+            for word in chunk_words:
+                abs_start = float(word.get("start", 0)) + start
+                if start > 0 and abs_start < start + self.overlap_seconds:
+                    continue
+                word["start"] = abs_start
+                word["end"] = float(word.get("end", 0)) + start
+                all_words.append(word)
+        return all_segments, all_words
 
-    def _transcribe_window(self, audio_path: str, start: float, length: float) -> List[Dict]:
-        """Вырезает окно, при необходимости дробит его, если чанк всё ещё больше 24 МБ."""
+    def _transcribe_window(self, audio_path: str, start: float, length: float) -> Tuple[List[Dict], List[Dict]]:
         if length <= 1:
-            return []
+            return [], []
 
         chunk_path = self._extract_chunk(audio_path, start, length)
         try:
@@ -154,12 +238,15 @@ class OpenAIWhisperService:
                 os.remove(chunk_path)
 
         mid = length / 2
-        left = self._transcribe_window(audio_path, start, mid)
-        right = self._transcribe_window(audio_path, start + mid, length - mid)
-        for segment in right:
+        left_segments, left_words = self._transcribe_window(audio_path, start, mid)
+        right_segments, right_words = self._transcribe_window(audio_path, start + mid, length - mid)
+        for segment in right_segments:
             segment["start"] = float(segment.get("start", 0)) + mid
             segment["end"] = float(segment.get("end", 0)) + mid
-        return left + right
+        for word in right_words:
+            word["start"] = float(word.get("start", 0)) + mid
+            word["end"] = float(word.get("end", 0)) + mid
+        return left_segments + right_segments, left_words + right_words
 
     def _extract_chunk(self, audio_path: str, start: float, length: float) -> str:
         fd, chunk_path = tempfile.mkstemp(suffix=".mp3")
@@ -192,14 +279,14 @@ class OpenAIWhisperService:
             return {
                 "model": self.model,
                 "response_format": "verbose_json",
-                "timestamp_granularities[]": "segment",
+                "timestamp_granularities[]": "word",
             }
         return {
             "model": self.model,
             "response_format": "json",
         }
 
-    def _transcribe_file(self, audio_path: str) -> List[Dict]:
+    def _transcribe_file(self, audio_path: str) -> Tuple[List[Dict], List[Dict]]:
         fields = self._request_fields()
         last_error = None
         for attempt in range(1, 6):
@@ -213,7 +300,7 @@ class OpenAIWhisperService:
                 )
 
             if response.status_code < 400:
-                return self._extract_segments(response.json())
+                return self._extract_payload(response.json())
 
             last_error = f"OpenAI API ошибка {response.status_code}: {response.text}"
             retryable = response.status_code in (408, 409, 429, 500, 502, 503, 504)
@@ -226,7 +313,7 @@ class OpenAIWhisperService:
 
         raise RuntimeError(last_error or "OpenAI API ошибка")
 
-    def _extract_segments(self, payload: dict) -> List[Dict]:
+    def _extract_payload(self, payload: dict) -> Tuple[List[Dict], List[Dict]]:
         raw = payload.get("segments") or payload.get("utterances") or []
         segments = []
         for item in raw:
@@ -239,10 +326,19 @@ class OpenAIWhisperService:
                 "text": text,
             })
 
-        if segments:
-            return segments
+        words = []
+        for item in payload.get("words") or []:
+            token = (item.get("word") or item.get("text") or "").strip()
+            if not token:
+                continue
+            words.append({
+                "word": token,
+                "start": item.get("start", 0),
+                "end": item.get("end", item.get("start", 0)),
+            })
 
-        text = (payload.get("text") or "").strip()
-        if not text:
-            return []
-        return [{"start": 0, "end": 0, "text": text}]
+        if not segments:
+            text = (payload.get("text") or "").strip()
+            if text:
+                segments = [{"start": 0, "end": 0, "text": text}]
+        return segments, words
