@@ -1,62 +1,120 @@
 """Транскрипция через ElevenLabs Speech-to-Text (Scribe)."""
 
 import os
+import re
 import time
-from typing import Dict, List, Optional
+from typing import List, Optional
 
 import requests
 
 from app.config import settings
-from app.openai_whisper_service import sentences_from_transcript
 
 
 ELEVENLABS_STT_URL = "https://api.elevenlabs.io/v1/speech-to-text"
+_STRONG_END = re.compile(r'[.!?…]["»”’)\]]*$')
+_ABBREVIATIONS = {"mr", "mrs", "ms", "dr", "prof", "vs", "etc", "т.д", "т.п"}
 
 
-def convert_elevenlabs_to_segments(payload: dict) -> List[Dict]:
-    """
-    ElevenLabs: {segments: [{text, start_time, end_time, words: [{text, start_time, end_time}]}]}
-    Наш формат: [{start, end, text}] по предложениям.
-    """
-    words: List[Dict] = []
-    texts: List[str] = []
+def _el_time(item: dict, *keys: str) -> float:
+    for key in keys:
+        if item.get(key) is not None:
+            return float(item[key])
+    return 0.0
 
+
+def _flatten_elevenlabs_words(payload: dict) -> List[dict]:
+    raw = []
     for segment in payload.get("segments") or []:
-        piece = (segment.get("text") or "").strip()
-        if piece:
-            texts.append(piece)
-        for item in segment.get("words") or []:
-            token = (item.get("text") or item.get("word") or "")
-            if not token or not token.strip():
-                continue
-            words.append({
-                "word": token.strip(),
-                "start": float(item.get("start_time", item.get("start", 0)) or 0),
-                "end": float(item.get("end_time", item.get("end", 0)) or 0),
-            })
+        raw.extend(segment.get("words") or [])
+    if not raw:
+        raw = payload.get("words") or []
 
+    words = []
+    for item in raw:
+        token = item.get("text") if "text" in item else item.get("word")
+        if token is None:
+            continue
+        words.append({
+            "text": token,
+            "start": _el_time(item, "start_time", "start"),
+            "end": _el_time(item, "end_time", "end"),
+        })
+    return words
+
+
+def _is_real_word(token: str) -> bool:
+    return bool((token or "").strip())
+
+
+def _next_real(words: List[dict], index: int):
+    for j in range(index + 1, len(words)):
+        if _is_real_word(words[j]["text"]):
+            return words[j]
+    return None
+
+
+def _should_split(token: str, gap: Optional[float], next_token: str) -> bool:
+    token = (token or "").strip()
+    if not token:
+        return False
+    if gap is None:
+        return True
+
+    core = re.sub(r'["»”’)\]]+$', "", token)
+    stem = core.rstrip(".…").lower().replace(".", "")
+    strong = bool(_STRONG_END.search(token)) and not re.fullmatch(r"\d+\.", core) and stem not in _ABBREVIATIONS
+    colon = token.endswith(":") or token.endswith(";")
+
+    # Точка/вопрос/восклицание — граница фразы, как в original
+    if strong:
+        return True
+    if colon and gap >= 0.25:
+        return True
+    if gap >= 0.55:
+        return True
+    return False
+
+
+def convert_elevenlabs_to_segments(payload: dict) -> List[dict]:
+    """
+    Режет ElevenLabs JSON в наш список {start, end, text}.
+    Текст и тайминг берутся из words, границы — пунктуация + пауза, не слепой split большого text.
+    """
+    words = _flatten_elevenlabs_words(payload)
     if not words:
-        for item in payload.get("words") or []:
-            token = (item.get("text") or item.get("word") or "")
-            if not token or not token.strip():
-                continue
-            words.append({
-                "word": token.strip(),
-                "start": float(item.get("start_time", item.get("start", 0)) or 0),
-                "end": float(item.get("end_time", item.get("end", 0)) or 0),
-            })
+        text = (payload.get("text") or "").strip()
+        return [{"start": 0.0, "end": 0.0, "text": text}] if text else []
 
-    text = " ".join(texts).strip() or (payload.get("text") or "").strip()
-    segments = sentences_from_transcript(text, words)
-    return [
-        {
-            "start": round(float(s.get("start", 0)), 3),
-            "end": round(float(s.get("end", 0)), 3),
-            "text": (s.get("text") or "").strip(),
-        }
-        for s in segments
-        if (s.get("text") or "").strip()
-    ]
+    segments: List[dict] = []
+    buf: List[dict] = []
+
+    def flush():
+        if not buf:
+            return
+        text = "".join(item["text"] for item in buf).strip()
+        real = [item for item in buf if _is_real_word(item["text"])]
+        if not text or not real:
+            buf.clear()
+            return
+        segments.append({
+            "start": round(float(real[0]["start"]), 3),
+            "end": round(float(real[-1]["end"]), 3),
+            "text": re.sub(r"\s+", " ", text),
+        })
+        buf.clear()
+
+    for i, word in enumerate(words):
+        buf.append(word)
+        if not _is_real_word(word["text"]):
+            continue
+        nxt = _next_real(words, i)
+        gap = None if nxt is None else max(0.0, nxt["start"] - word["end"])
+        next_token = "" if nxt is None else nxt["text"]
+        if _should_split(word["text"], gap, next_token):
+            flush()
+
+    flush()
+    return segments
 
 
 class ElevenLabsService:
@@ -69,7 +127,7 @@ class ElevenLabsService:
         if not self.api_key:
             raise ValueError("ELEVENLABS_API_KEY не задан. Укажите ключ в .env.")
 
-    def transcribe_audio(self, audio_path: str) -> List[Dict]:
+    def transcribe_audio(self, audio_path: str) -> List[dict]:
         if not os.path.exists(audio_path):
             raise FileNotFoundError(f"Аудио файл не найден: {audio_path}")
 
