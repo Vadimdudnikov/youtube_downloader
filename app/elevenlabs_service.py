@@ -53,24 +53,53 @@ def _next_real(words: List[dict], index: int):
     return None
 
 
-def _should_split(token: str, gap: Optional[float], next_token: str) -> bool:
+def _is_strong_end(token: str) -> bool:
+    token = (token or "").strip()
+    if not token:
+        return False
+    core = re.sub(r'["»”’)\]]+$', "", token)
+    stem = core.rstrip(".…").lower().replace(".", "")
+    return bool(_STRONG_END.search(token)) and not re.fullmatch(r"\d+\.", core) and stem not in _ABBREVIATIONS
+
+
+def _soften_false_period(word: dict, nxt: Optional[dict]) -> None:
+    """ElevenLabs часто ставит точку там, где это запятая внутри одной фразы."""
+    word["text"] = re.sub(r"\.([\"»”’)\]]*)$", r",\1", word["text"])
+    if not nxt:
+        return
+    nxt_text = nxt["text"]
+    first = nxt_text[:1]
+    rest = nxt_text[1:]
+    if first.isupper() and rest[:1].islower():
+        nxt["text"] = first.lower() + rest
+
+
+def _should_split(
+    token: str,
+    gap: Optional[float],
+    next_token: str,
+    buf_duration: float,
+    buf_words: int,
+) -> bool:
     token = (token or "").strip()
     if not token:
         return False
     if gap is None:
         return True
 
-    core = re.sub(r'["»”’)\]]+$', "", token)
-    stem = core.rstrip(".…").lower().replace(".", "")
-    strong = bool(_STRONG_END.search(token)) and not re.fullmatch(r"\d+\.", core) and stem not in _ABBREVIATIONS
+    strong = _is_strong_end(token)
     colon = token.endswith(":") or token.endswith(";")
+    next_starts_lower = bool((next_token or "").strip()[:1].islower())
 
-    # Точка/вопрос/восклицание — граница фразы, как в original
+    # Запятая и пауза сами по себе не режут фразу.
     if strong:
+        if next_starts_lower:
+            return False
+        # Короткая клауза + небольшая пауза: «уходить. Комарам» → одна фраза.
+        if gap < 0.85 and buf_duration < 2.0 and buf_words <= 4:
+            return False
         return True
     if colon and gap >= 0.25:
-        return True
-    if gap >= 0.55:
         return True
     return False
 
@@ -110,8 +139,14 @@ def convert_elevenlabs_to_segments(payload: dict) -> List[dict]:
         nxt = _next_real(words, i)
         gap = None if nxt is None else max(0.0, nxt["start"] - word["end"])
         next_token = "" if nxt is None else nxt["text"]
-        if _should_split(word["text"], gap, next_token):
+        real_buf = [item for item in buf if _is_real_word(item["text"])]
+        buf_duration = (
+            float(real_buf[-1]["end"]) - float(real_buf[0]["start"]) if real_buf else 0.0
+        )
+        if _should_split(word["text"], gap, next_token, buf_duration, len(real_buf)):
             flush()
+        elif nxt is not None and _is_strong_end(word["text"]):
+            _soften_false_period(word, nxt)
 
     flush()
     return segments
