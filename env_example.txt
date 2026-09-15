@@ -10,7 +10,7 @@ COOKIES_FILE=cookies.txt
 # Настройки приложения
 DEBUG=false
 
-# Транскрипция: whisperx (локально, старая логика) или openai (новый API)
+# Транскрипция: whisperx | openai | elevenlabs
 TRANSCRIPTION_PROVIDER=whisperx
 OPENAI_API_KEY=
 # whisper-1 — сегменты по предложениям, как у WhisperX
@@ -18,3 +18,8 @@ OPENAI_TRANSCRIPTION_MODEL=whisper-1
 # Нарезка длинных файлов (лимит API 25 МБ)
 OPENAI_CHUNK_DURATION_MINUTES=8
 OPENAI_CHUNK_OVERLAP_SECONDS=3
+
+ELEVENLABS_API_KEY=
+ELEVENLABS_MODEL=scribe_v2
+# Пусто = автоопределение языка
+ELEVENLABS_LANGUAGE_CODE=

@@ -32,13 +32,17 @@ class Settings(BaseSettings):
     chunk_duration_minutes: int = 10  # Длительность чанка для больших файлов в минутах
     tmp_dir: str = "assets/tmp"  # Временная директория для задач
 
-    # Транскрипция: whisperx (локально) или openai (API)
+    # Транскрипция: whisperx (локально), openai или elevenlabs
     transcription_provider: str = "whisperx"
     openai_api_key: str = ""
     # whisper-1 сам отдаёт сегменты по предложениям, как WhisperX
     openai_transcription_model: str = "whisper-1"
     openai_chunk_duration_minutes: int = 8  # длинные файлы режем, чтобы не упереться в 25 МБ / таймауты
     openai_chunk_overlap_seconds: int = 3
+
+    elevenlabs_api_key: str = ""
+    elevenlabs_model: str = "scribe_v2"
+    elevenlabs_language_code: str = ""  # пусто = авто, иначе rus/eng/...
     
     class Config:
         case_sensitive = False

@@ -4,7 +4,7 @@ from pydantic import BaseModel, HttpUrl, model_validator
 import os
 from pathlib import Path
 
-from app.tasks import download_video_task, create_srt_from_youtube_task, create_srt_openai_task
+from app.tasks import download_video_task, create_srt_from_youtube_task, create_srt_openai_task, create_srt_elevenlabs_task
 from app.config import settings
 from typing import Optional
 
@@ -267,23 +267,33 @@ async def list_downloads():
         raise HTTPException(status_code=400, detail=f"Ошибка получения списка: {str(e)}")
 
 
-def _use_openai_srt() -> bool:
-    return (settings.transcription_provider or "").strip().lower() == "openai"
+def _srt_provider() -> str:
+    return (settings.transcription_provider or "").strip().lower()
 
 
 @router.post("/srt", response_model=SRTResponse)
 async def create_srt(request: SRTRequest):
-    """Создать субтитры. Провайдер берётся из TRANSCRIPTION_PROVIDER (whisperx|openai)."""
+    """Создать субтитры. Провайдер: TRANSCRIPTION_PROVIDER=whisperx|openai|elevenlabs."""
     try:
         media_url = request.media_url
+        provider = _srt_provider()
 
-        if _use_openai_srt():
+        if provider == "openai":
             task = create_srt_openai_task.delay(media_url)
             return SRTResponse(
                 task_id=task.id,
                 youtube_url=media_url,
                 status="pending",
                 message="Задача создания SRT через OpenAI создана"
+            )
+
+        if provider == "elevenlabs":
+            task = create_srt_elevenlabs_task.delay(media_url)
+            return SRTResponse(
+                task_id=task.id,
+                youtube_url=media_url,
+                status="pending",
+                message="Задача создания SRT через ElevenLabs создана"
             )
 
         valid_models = ["tiny", "base", "small", "medium", "large"]
@@ -411,6 +421,28 @@ async def get_srt_status(task_id: str):
 @router.get("/srt/openai/status/{task_id}")
 async def get_srt_openai_status(task_id: str):
     """Статус задачи OpenAI SRT (тот же формат, что /srt/status)."""
+    return await get_srt_status(task_id)
+
+
+@router.post("/srt/elevenlabs", response_model=SRTResponse)
+async def create_srt_elevenlabs(request: SRTRequest):
+    """Создать JSON+SRT через ElevenLabs API (независимо от TRANSCRIPTION_PROVIDER)."""
+    try:
+        media_url = request.media_url
+        task = create_srt_elevenlabs_task.delay(media_url)
+        return SRTResponse(
+            task_id=task.id,
+            youtube_url=media_url,
+            status="pending",
+            message="Задача создания SRT через ElevenLabs создана"
+        )
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Ошибка создания задачи: {str(e)}")
+
+
+@router.get("/srt/elevenlabs/status/{task_id}")
+async def get_srt_elevenlabs_status(task_id: str):
+    """Статус задачи ElevenLabs SRT."""
     return await get_srt_status(task_id)
 
 

@@ -39,6 +39,8 @@ celery_app.conf.update(
         'app.tasks.create_srt_from_youtube_task': {'queue': 'transcription'},
         'app.tasks.transcribe_audio_openai_task': {'queue': 'transcription'},
         'app.tasks.create_srt_openai_task': {'queue': 'transcription'},
+        'app.tasks.transcribe_audio_elevenlabs_task': {'queue': 'transcription'},
+        'app.tasks.create_srt_elevenlabs_task': {'queue': 'transcription'},
         'app.tasks.create_no_vocals_task': {'queue': 'no_vocals'},
     },
 )
