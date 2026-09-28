@@ -88,18 +88,15 @@ def _should_split(
         return True
 
     strong = _is_strong_end(token)
-    colon = token.endswith(":") or token.endswith(";")
     next_starts_lower = bool((next_token or "").strip()[:1].islower())
 
-    # Запятая и пауза сами по себе не режут фразу.
+    # :, ;, запятая и пауза сами по себе не режут — «дата: август…» одна фраза.
     if strong:
         if next_starts_lower:
             return False
         # Короткая клауза + небольшая пауза: «уходить. Комарам» → одна фраза.
         if gap < 0.85 and buf_duration < 2.0 and buf_words <= 4:
             return False
-        return True
-    if colon and gap >= 0.25:
         return True
     return False
 
