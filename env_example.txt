@@ -11,7 +11,8 @@ COOKIES_FILE=cookies.txt
 DEBUG=false
 
 # Транскрипция: whisperx | openai | elevenlabs
-TRANSCRIPTION_PROVIDER=whisperx
+# Для start_cpu.sh используйте openai или elevenlabs (whisperx требует CUDA)
+TRANSCRIPTION_PROVIDER=openai
 OPENAI_API_KEY=
 # whisper-1 — сегменты по предложениям, как у WhisperX
 OPENAI_TRANSCRIPTION_MODEL=whisper-1

@@ -4,7 +4,6 @@ import json
 from app.celery_app import celery_app
 from app.config import settings
 from app.rapidapi_service import RapidAPIService
-from app.whisperx_service import WhisperXService
 from app.direct_media_service import DirectMediaService
 from app.openai_whisper_service import OpenAIWhisperService, segments_to_srt
 from app.elevenlabs_service import ElevenLabsService
@@ -243,9 +242,9 @@ def create_no_vocals_task(self, mp3_path: str):
         self.update_state(state='PROGRESS', meta={'status': 'Запуск Demucs...', 'progress': 10})
 
         with tempfile.TemporaryDirectory(prefix="demucs_") as tmp_dir:
-            # demucs --two-stems=vocals создаёт no_vocals.wav и vocals.wav
+            # demucs --two-stems=vocals создаёт no_vocals.wav и vocals.wav (всегда CPU)
             cmd = [
-                "demucs", "--two-stems=vocals", "-o", tmp_dir, mp3_path
+                "demucs", "-d", "cpu", "--two-stems=vocals", "-o", tmp_dir, mp3_path
             ]
             self.update_state(state='PROGRESS', meta={'status': 'Разделение источников (Demucs)...', 'progress': 20})
             proc = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
@@ -348,6 +347,7 @@ def transcribe_audio_task(self, audio_path: str, task_id: str = None, model_size
         )
         
         # Создаём сервис транскрипции и выполняем транскрипцию
+        from app.whisperx_service import WhisperXService
         transcription_service = WhisperXService(model_size=model_size)
         
         self.update_state(

@@ -1,0 +1,29 @@
+# CPU-режим: без CUDA / WhisperX (SRT через OpenAI / ElevenLabs API)
+# Demucs работает на CPU
+
+# Celery и Redis для асинхронных задач
+celery>=5.3.0
+redis>=4.5.0
+flower>=2.0.0
+
+# FastAPI и веб-сервер
+fastapi>=0.104.0
+uvicorn>=0.24.0
+pydantic>=2.5.0
+pydantic-settings>=2.1.0
+python-multipart
+
+# HTTP клиенты
+requests>=2.31.0
+
+# Аудио
+pydub>=0.25.1
+soundfile>=0.12.0
+
+# Demucs для разделения вокала/инструментала (аудио без голоса)
+demucs>=4.0.0
+
+# PyTorch CPU (для demucs, без CUDA)
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.6.0
+torchaudio==2.6.0
