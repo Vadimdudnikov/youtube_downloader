@@ -17,7 +17,7 @@ class Settings(BaseSettings):
     }
     
     # Настройки файлов
-    # Для Docker: задайте абсолютный путь, например UPLOAD_DIR=/home/youtube_downloader/assets
+    # Абсолютный путь для volume, например UPLOAD_DIR=/workspace/assets
     upload_dir: str = "assets"
     cookies_file: str = "cookies.txt"  # Путь к файлу cookies
     max_file_size: int = 100 * 1024 * 1024  # 100MB
@@ -30,7 +30,7 @@ class Settings(BaseSettings):
     # Настройки WhisperX
     whisperx_model: str = "medium"  # Модель WhisperX (tiny, base, small, medium, large)
     chunk_duration_minutes: int = 10  # Длительность чанка для больших файлов в минутах
-    tmp_dir: str = "assets/tmp"  # Временная директория для задач
+    tmp_dir: str = "assets/tmp"  # Временная директория; в CPU-старте: TMP_DIR=/workspace/assets/tmp
 
     # Транскрипция: whisperx (локально), openai или elevenlabs
     transcription_provider: str = "whisperx"

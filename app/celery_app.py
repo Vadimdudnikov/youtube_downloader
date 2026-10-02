@@ -46,16 +46,13 @@ celery_app.conf.update(
 )
 
 # Создание папок assets и подпапок если их нет
-assets_dir = "assets"
+from app.config import settings
+
+assets_dir = settings.upload_dir if os.path.isabs(settings.upload_dir) else "assets"
 video_dir = os.path.join(assets_dir, "video")
 srt_dir = os.path.join(assets_dir, "srt")
 nvoice_dir = os.path.join(assets_dir, "nvoice")
 
-if not os.path.exists(assets_dir):
-    os.makedirs(assets_dir)
-if not os.path.exists(video_dir):
-    os.makedirs(video_dir)
-if not os.path.exists(srt_dir):
-    os.makedirs(srt_dir)
-if not os.path.exists(nvoice_dir):
-    os.makedirs(nvoice_dir)
+os.makedirs(video_dir, exist_ok=True)
+os.makedirs(srt_dir, exist_ok=True)
+os.makedirs(nvoice_dir, exist_ok=True)
