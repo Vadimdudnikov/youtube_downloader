@@ -23,7 +23,7 @@ extract_youtube_id = extract_media_id
 
 def ensure_directories():
     """Создает необходимые директории если их нет"""
-    assets_dir = "assets"
+    assets_dir = settings.upload_dir if os.path.isabs(settings.upload_dir) else "assets"
     video_dir = os.path.join(assets_dir, "video")
     srt_dir = os.path.join(assets_dir, "srt")
     nvoice_dir = os.path.join(assets_dir, "nvoice")
@@ -33,6 +33,22 @@ def ensure_directories():
     os.makedirs(nvoice_dir, exist_ok=True)
     
     return video_dir, srt_dir, nvoice_dir
+
+
+def _nvoice_path(media_id: str) -> str:
+    _, _, nvoice_dir = ensure_directories()
+    return os.path.join(nvoice_dir, f"{media_id}.mp3")
+
+
+def _enqueue_no_vocals_if_needed(mp3_path: str, media_id: str = None) -> bool:
+    """Ставит create_no_vocals только если файла в nvoice ещё нет. Возвращает True, если задача поставлена."""
+    base_name = media_id or os.path.splitext(os.path.basename(mp3_path))[0]
+    out_path = _nvoice_path(base_name)
+    if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+        print(f"nvoice уже есть, пропускаем create_no_vocals: {os.path.basename(out_path)}")
+        return False
+    create_no_vocals_task.delay(mp3_path)
+    return True
 
 
 def _ensure_ffmpeg():
@@ -69,7 +85,7 @@ def download_video_task(self, youtube_url: str, audio_only: bool = False):
             if os.path.exists(mp3_path):
                 file_size = os.path.getsize(mp3_path)
                 print(f"Файл уже существует локально: {mp3_file}")
-                create_no_vocals_task.delay(mp3_path)
+                _enqueue_no_vocals_if_needed(mp3_path, media_id)
                 return {
                     'status': 'completed',
                     'progress': 100,
@@ -101,7 +117,7 @@ def download_video_task(self, youtube_url: str, audio_only: bool = False):
                 state='PROGRESS',
                 meta={'status': 'Загрузка завершена', 'progress': 100}
             )
-            create_no_vocals_task.delay(result['file_path'])
+            _enqueue_no_vocals_if_needed(result['file_path'], media_id)
             return {
                 'status': 'completed',
                 'progress': 100,
@@ -130,7 +146,7 @@ def download_video_task(self, youtube_url: str, audio_only: bool = False):
         if os.path.exists(mp3_path):
             file_size = os.path.getsize(mp3_path)
             print(f"Файл уже существует локально: {mp3_file}")
-            create_no_vocals_task.delay(mp3_path)
+            _enqueue_no_vocals_if_needed(mp3_path, media_id)
             return {
                 'status': 'completed',
                 'progress': 100,
@@ -165,7 +181,7 @@ def download_video_task(self, youtube_url: str, audio_only: bool = False):
             state='PROGRESS',
             meta={'status': 'Загрузка завершена', 'progress': 100}
         )
-        create_no_vocals_task.delay(downloaded_path)
+        _enqueue_no_vocals_if_needed(downloaded_path, media_id)
         return {
             'status': 'completed',
             'progress': 100,

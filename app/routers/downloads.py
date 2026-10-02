@@ -1,7 +1,8 @@
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, UploadFile, File, Form
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, HttpUrl, model_validator
 import os
+import re
 from pathlib import Path
 
 from app.tasks import download_video_task, create_srt_from_youtube_task, create_srt_openai_task, create_srt_elevenlabs_task
@@ -9,6 +10,8 @@ from app.config import settings
 from typing import Optional
 
 router = APIRouter()
+
+_VIDEO_ID_RE = re.compile(r"^[a-zA-Z0-9_-]{6,32}$")
 
 
 def _get_assets_dir() -> Path:
@@ -20,6 +23,16 @@ def _get_assets_dir() -> Path:
 
 
 _ASSETS_DIR = _get_assets_dir()
+
+
+def _validate_video_id(video_id: str) -> str:
+    video_id = (video_id or "").strip()
+    if not _VIDEO_ID_RE.fullmatch(video_id):
+        raise HTTPException(
+            status_code=400,
+            detail="Некорректный video_id. Ожидается 6–32 символа: a-z, A-Z, 0-9, _, -",
+        )
+    return video_id
 
 
 class DownloadRequest(BaseModel):
@@ -265,6 +278,120 @@ async def list_downloads():
         }
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Ошибка получения списка: {str(e)}")
+
+
+class NoVocalsUploadResponse(BaseModel):
+    video_id: str
+    file_name: str
+    file_size: int
+    replaced: bool
+    message: str
+    download_url: str
+
+
+@router.post("/nvoice", response_model=NoVocalsUploadResponse)
+async def upload_no_vocals(
+    video_id: str = Form(..., description="ID видео (имя файла без расширения)"),
+    file: UploadFile = File(..., description="Аудиофайл без голоса (mp3)"),
+):
+    """Загрузить no_vocals в assets/nvoice/{video_id}.mp3. Если файл уже есть — заменить."""
+    video_id = _validate_video_id(video_id)
+
+    nvoice_dir = _ASSETS_DIR / "nvoice"
+    nvoice_dir.mkdir(parents=True, exist_ok=True)
+
+    file_name = f"{video_id}.mp3"
+    dest_path = nvoice_dir / file_name
+    tmp_path = nvoice_dir / f".{video_id}.mp3.upload"
+    replaced = dest_path.exists()
+    written = 0
+
+    try:
+        with tmp_path.open("wb") as out:
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                written += len(chunk)
+                if written > settings.max_file_size:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Файл слишком большой. Максимум: {settings.max_file_size} байт",
+                    )
+                out.write(chunk)
+
+        if written == 0:
+            raise HTTPException(status_code=400, detail="Пустой файл")
+
+        tmp_path.replace(dest_path)
+    except HTTPException:
+        if tmp_path.exists():
+            tmp_path.unlink(missing_ok=True)
+        raise
+    except Exception as e:
+        if tmp_path.exists():
+            tmp_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=400, detail=f"Ошибка сохранения файла: {str(e)}")
+    finally:
+        await file.close()
+
+    return NoVocalsUploadResponse(
+        video_id=video_id,
+        file_name=file_name,
+        file_size=written,
+        replaced=replaced,
+        message="Файл no_vocals заменён" if replaced else "Файл no_vocals загружен",
+        download_url=f"/api/v1/file/{file_name}?no_vocals=true",
+    )
+
+
+class DeleteVideoFilesResponse(BaseModel):
+    video_id: str
+    deleted: list[str]
+    total: int
+    message: str
+
+
+@router.delete("/files/{video_id}", response_model=DeleteVideoFilesResponse)
+async def delete_video_files(video_id: str):
+    """Удалить все файлы, связанные с video_id (video, srt, nvoice)."""
+    video_id = _validate_video_id(video_id)
+
+    dirs = (
+        _ASSETS_DIR / "video",
+        _ASSETS_DIR / "srt",
+        _ASSETS_DIR / "nvoice",
+    )
+    # Типичные расширения + любой другой {video_id}.*
+    known_names = {
+        f"{video_id}.mp3",
+        f"{video_id}.mp4",
+        f"{video_id}.wav",
+        f"{video_id}.json",
+        f"{video_id}.srt",
+    }
+
+    deleted: list[str] = []
+    try:
+        for folder in dirs:
+            if not folder.exists():
+                continue
+            for path in folder.iterdir():
+                if not path.is_file():
+                    continue
+                if path.name in known_names or path.stem == video_id:
+                    rel = f"{folder.name}/{path.name}"
+                    path.unlink()
+                    deleted.append(rel)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Ошибка удаления файлов: {str(e)}")
+
+    return DeleteVideoFilesResponse(
+        video_id=video_id,
+        deleted=deleted,
+        total=len(deleted),
+        message="Файлы удалены" if deleted else "Файлы не найдены",
+    )
 
 
 def _srt_provider() -> str:
