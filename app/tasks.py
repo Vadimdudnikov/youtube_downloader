@@ -58,15 +58,17 @@ def _ensure_ffmpeg():
 
 
 @celery_app.task(bind=True)
-def download_video_task(self, youtube_url: str, audio_only: bool = False):
+def download_video_task(self, youtube_url: str, audio_only: bool = False, video_id: str = None):
     """
     Задача для загрузки медиа в MP3 (стандартная схема):
     - YouTube → RapidAPI
     - Прямые ссылки (mp4 playprofi и т.п.) → скачать → конвертировать в MP3 → no_vocals
+
+    video_id: опционально для прямых ссылок — имя файлов (как YouTube ID).
     """
     try:
         media_url = youtube_url
-        media_id = extract_media_id(media_url)
+        media_id = (video_id or "").strip() or extract_media_id(media_url)
         print(f"Media ID: {media_id} | YouTube={is_youtube_url(media_url)}")
 
         video_dir, srt_dir, _ = ensure_directories()
@@ -464,7 +466,7 @@ def transcribe_audio_task(self, audio_path: str, task_id: str = None, model_size
 
 
 @celery_app.task(bind=True)
-def create_srt_from_youtube_task(self, youtube_url: str, model_size: str = "medium"):
+def create_srt_from_youtube_task(self, youtube_url: str, model_size: str = "medium", video_id: str = None):
     """
     Задача для создания JSON файла с субтитрами из медиа URL
     (YouTube или прямая ссылка на видео, например playprofi).
@@ -473,12 +475,13 @@ def create_srt_from_youtube_task(self, youtube_url: str, model_size: str = "medi
     Args:
         youtube_url: URL видео (YouTube или прямой media URL)
         model_size: Размер модели WhisperX (tiny, base, small, medium, large)
+        video_id: опционально для прямых ссылок — имя файлов (как YouTube ID)
     """
     try:
         video_dir, srt_dir, _ = ensure_directories()
 
         media_url = youtube_url
-        media_id = extract_media_id(media_url)
+        media_id = (video_id or "").strip() or extract_media_id(media_url)
         print(f"Создание JSON субтитров для Media ID: {media_id} (source={'youtube' if is_youtube_url(media_url) else 'direct'})")
 
         json_file = f"{media_id}.json"
@@ -527,7 +530,7 @@ def create_srt_from_youtube_task(self, youtube_url: str, model_size: str = "medi
 
             print(f"Аудио файл не найден. Загружаем аудио для {media_url}")
 
-            download_result = download_video_task.apply(args=[media_url, True])
+            download_result = download_video_task.apply(args=[media_url, True, media_id])
 
             if download_result.successful():
                 result = download_result.result
@@ -632,7 +635,7 @@ def _ensure_audio_for_media(self, media_url: str, media_id: str, video_dir: str)
             meta={'status': 'Аудио не найдено. Загружаем аудио...', 'progress': 10}
         )
         print(f"Аудио файл не найден. Загружаем аудио для {media_url}")
-        download_result = download_video_task.apply(args=[media_url, True])
+        download_result = download_video_task.apply(args=[media_url, True, media_id])
         if download_result.successful():
             result = download_result.result
             if isinstance(result, dict) and result.get('status') == 'failed':
@@ -716,12 +719,12 @@ def transcribe_audio_openai_task(self, audio_path: str, task_id: str = None):
 
 
 @celery_app.task(bind=True, time_limit=4 * 60 * 60, soft_time_limit=3 * 60 * 60 + 50 * 60)
-def create_srt_openai_task(self, youtube_url: str):
+def create_srt_openai_task(self, youtube_url: str, video_id: str = None):
     """Создаёт JSON+SRT через OpenAI API (скачивание как в старой схеме)."""
     try:
         video_dir, srt_dir, _ = ensure_directories()
         media_url = youtube_url
-        media_id = extract_media_id(media_url)
+        media_id = (video_id or "").strip() or extract_media_id(media_url)
         print(f"OpenAI SRT для Media ID: {media_id}")
 
         json_file = f"{media_id}.json"
@@ -869,12 +872,12 @@ def transcribe_audio_elevenlabs_task(self, audio_path: str, task_id: str = None)
 
 
 @celery_app.task(bind=True, time_limit=4 * 60 * 60, soft_time_limit=3 * 60 * 60 + 50 * 60)
-def create_srt_elevenlabs_task(self, youtube_url: str):
+def create_srt_elevenlabs_task(self, youtube_url: str, video_id: str = None):
     """Создаёт JSON+SRT через ElevenLabs API."""
     try:
         video_dir, srt_dir, _ = ensure_directories()
         media_url = youtube_url
-        media_id = extract_media_id(media_url)
+        media_id = (video_id or "").strip() or extract_media_id(media_url)
         print(f"ElevenLabs SRT для Media ID: {media_id}")
 
         json_file = f"{media_id}.json"
