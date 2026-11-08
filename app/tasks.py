@@ -7,7 +7,7 @@ from app.rapidapi_service import RapidAPIService
 from app.direct_media_service import DirectMediaService
 from app.openai_whisper_service import OpenAIWhisperService, segments_to_srt
 from app.elevenlabs_service import ElevenLabsService
-from app.media_utils import extract_media_id, is_youtube_url
+from app.media_utils import extract_media_id, is_youtube_url, resolve_media_ref
 
 import warnings
 
@@ -64,11 +64,13 @@ def download_video_task(self, youtube_url: str, audio_only: bool = False, video_
     - YouTube → RapidAPI
     - Прямые ссылки (mp4 playprofi и т.п.) → скачать → конвертировать в MP3 → no_vocals
 
-    video_id: опционально для прямых ссылок — имя файлов (как YouTube ID).
+    video_id в query URL (?video_id=...) задаёт имя файлов и перед скачиванием вырезается.
+    Аргумент video_id — для внутренних вызовов (уже известный id).
     """
     try:
-        media_url = youtube_url
-        media_id = (video_id or "").strip() or extract_media_id(media_url)
+        media_url, media_id = resolve_media_ref(youtube_url)
+        if (video_id or "").strip():
+            media_id = video_id.strip()
         print(f"Media ID: {media_id} | YouTube={is_youtube_url(media_url)}")
 
         video_dir, srt_dir, _ = ensure_directories()
@@ -466,22 +468,20 @@ def transcribe_audio_task(self, audio_path: str, task_id: str = None, model_size
 
 
 @celery_app.task(bind=True)
-def create_srt_from_youtube_task(self, youtube_url: str, model_size: str = "medium", video_id: str = None):
+def create_srt_from_youtube_task(self, youtube_url: str, model_size: str = "medium"):
     """
     Задача для создания JSON файла с субтитрами из медиа URL
     (YouTube или прямая ссылка на видео, например playprofi).
     Выполняет загрузку аудио (если нужно) и транскрипцию последовательно.
 
     Args:
-        youtube_url: URL видео (YouTube или прямой media URL)
+        youtube_url: URL видео (YouTube или прямой media URL); ?video_id= для имени файлов
         model_size: Размер модели WhisperX (tiny, base, small, medium, large)
-        video_id: опционально для прямых ссылок — имя файлов (как YouTube ID)
     """
     try:
         video_dir, srt_dir, _ = ensure_directories()
 
-        media_url = youtube_url
-        media_id = (video_id or "").strip() or extract_media_id(media_url)
+        media_url, media_id = resolve_media_ref(youtube_url)
         print(f"Создание JSON субтитров для Media ID: {media_id} (source={'youtube' if is_youtube_url(media_url) else 'direct'})")
 
         json_file = f"{media_id}.json"
@@ -719,12 +719,11 @@ def transcribe_audio_openai_task(self, audio_path: str, task_id: str = None):
 
 
 @celery_app.task(bind=True, time_limit=4 * 60 * 60, soft_time_limit=3 * 60 * 60 + 50 * 60)
-def create_srt_openai_task(self, youtube_url: str, video_id: str = None):
+def create_srt_openai_task(self, youtube_url: str):
     """Создаёт JSON+SRT через OpenAI API (скачивание как в старой схеме)."""
     try:
         video_dir, srt_dir, _ = ensure_directories()
-        media_url = youtube_url
-        media_id = (video_id or "").strip() or extract_media_id(media_url)
+        media_url, media_id = resolve_media_ref(youtube_url)
         print(f"OpenAI SRT для Media ID: {media_id}")
 
         json_file = f"{media_id}.json"
@@ -872,12 +871,11 @@ def transcribe_audio_elevenlabs_task(self, audio_path: str, task_id: str = None)
 
 
 @celery_app.task(bind=True, time_limit=4 * 60 * 60, soft_time_limit=3 * 60 * 60 + 50 * 60)
-def create_srt_elevenlabs_task(self, youtube_url: str, video_id: str = None):
+def create_srt_elevenlabs_task(self, youtube_url: str):
     """Создаёт JSON+SRT через ElevenLabs API."""
     try:
         video_dir, srt_dir, _ = ensure_directories()
-        media_url = youtube_url
-        media_id = (video_id or "").strip() or extract_media_id(media_url)
+        media_url, media_id = resolve_media_ref(youtube_url)
         print(f"ElevenLabs SRT для Media ID: {media_id}")
 
         json_file = f"{media_id}.json"

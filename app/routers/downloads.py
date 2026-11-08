@@ -39,20 +39,12 @@ class DownloadRequest(BaseModel):
     """youtube_url или url — YouTube либо прямая ссылка на медиа (playprofi и т.п.)."""
     youtube_url: Optional[HttpUrl] = None
     url: Optional[HttpUrl] = None
-    video_id: Optional[str] = None  # для прямых ссылок: имя файлов как у YouTube ID
     audio_only: bool = False
 
     @model_validator(mode="after")
     def require_media_url(self):
         if not self.youtube_url and not self.url:
             raise ValueError("Укажите youtube_url или url")
-        if self.video_id is not None:
-            vid = (self.video_id or "").strip()
-            if not _VIDEO_ID_RE.fullmatch(vid):
-                raise ValueError(
-                    "Некорректный video_id. Ожидается 6–32 символа: a-z, A-Z, 0-9, _, -"
-                )
-            self.video_id = vid
         return self
 
     @property
@@ -70,20 +62,12 @@ class DownloadResponse(BaseModel):
 class SRTRequest(BaseModel):
     youtube_url: Optional[HttpUrl] = None
     url: Optional[HttpUrl] = None
-    video_id: Optional[str] = None  # для прямых ссылок: имя файлов как у YouTube ID
     model_size: Optional[str] = "medium"  # tiny, base, small, medium, large
 
     @model_validator(mode="after")
     def require_media_url(self):
         if not self.youtube_url and not self.url:
             raise ValueError("Укажите youtube_url или url")
-        if self.video_id is not None:
-            vid = (self.video_id or "").strip()
-            if not _VIDEO_ID_RE.fullmatch(vid):
-                raise ValueError(
-                    "Некорректный video_id. Ожидается 6–32 символа: a-z, A-Z, 0-9, _, -"
-                )
-            self.video_id = vid
         return self
 
     @property
@@ -103,7 +87,7 @@ async def download_video(request: DownloadRequest):
     """Загрузить видео/аудио: YouTube или прямая media-ссылка (например playprofi)."""
     try:
         media_url = request.media_url
-        task = download_video_task.delay(media_url, request.audio_only, request.video_id)
+        task = download_video_task.delay(media_url, request.audio_only)
 
         download_type = "аудио" if request.audio_only else "видео"
         return DownloadResponse(
@@ -419,11 +403,10 @@ async def create_srt(request: SRTRequest):
     """Создать субтитры. Провайдер: TRANSCRIPTION_PROVIDER=whisperx|openai|elevenlabs."""
     try:
         media_url = request.media_url
-        video_id = request.video_id
         provider = _srt_provider()
 
         if provider == "openai":
-            task = create_srt_openai_task.delay(media_url, video_id)
+            task = create_srt_openai_task.delay(media_url)
             return SRTResponse(
                 task_id=task.id,
                 youtube_url=media_url,
@@ -432,7 +415,7 @@ async def create_srt(request: SRTRequest):
             )
 
         if provider == "elevenlabs":
-            task = create_srt_elevenlabs_task.delay(media_url, video_id)
+            task = create_srt_elevenlabs_task.delay(media_url)
             return SRTResponse(
                 task_id=task.id,
                 youtube_url=media_url,
@@ -449,8 +432,7 @@ async def create_srt(request: SRTRequest):
 
         task = create_srt_from_youtube_task.delay(
             media_url,
-            model_size=request.model_size,
-            video_id=video_id,
+            model_size=request.model_size
         )
 
         return SRTResponse(
@@ -470,7 +452,7 @@ async def create_srt_openai(request: SRTRequest):
     """Создать JSON+SRT через OpenAI API (независимо от TRANSCRIPTION_PROVIDER)."""
     try:
         media_url = request.media_url
-        task = create_srt_openai_task.delay(media_url, request.video_id)
+        task = create_srt_openai_task.delay(media_url)
         return SRTResponse(
             task_id=task.id,
             youtube_url=media_url,
@@ -574,7 +556,7 @@ async def create_srt_elevenlabs(request: SRTRequest):
     """Создать JSON+SRT через ElevenLabs API (независимо от TRANSCRIPTION_PROVIDER)."""
     try:
         media_url = request.media_url
-        task = create_srt_elevenlabs_task.delay(media_url, request.video_id)
+        task = create_srt_elevenlabs_task.delay(media_url)
         return SRTResponse(
             task_id=task.id,
             youtube_url=media_url,

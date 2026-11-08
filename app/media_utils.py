@@ -2,8 +2,8 @@
 
 import hashlib
 import re
-from typing import Optional
-from urllib.parse import urlparse, unquote
+from typing import Optional, Tuple
+from urllib.parse import parse_qsl, urlencode, urlparse, unquote, urlunparse
 
 
 YOUTUBE_HOSTS = (
@@ -13,6 +13,8 @@ YOUTUBE_HOSTS = (
     "youtu.be",
     "www.youtu.be",
 )
+
+_VIDEO_ID_RE = re.compile(r"^[a-zA-Z0-9_-]{6,32}$")
 
 
 def is_youtube_url(url: str) -> bool:
@@ -41,13 +43,39 @@ def extract_youtube_id(url: str) -> Optional[str]:
     return None
 
 
+def strip_query_video_id(url: str) -> Tuple[str, Optional[str]]:
+    """
+    Если в query есть video_id — убирает его из URL и возвращает значение.
+    Остальные query-параметры сохраняются (важно для Я.Диска и т.п.).
+    """
+    parsed = urlparse(url)
+    pairs = parse_qsl(parsed.query, keep_blank_values=True)
+    video_id = None
+    kept = []
+    for key, value in pairs:
+        if key == "video_id" and video_id is None:
+            candidate = (value or "").strip()
+            video_id = candidate or None
+            continue
+        kept.append((key, value))
+
+    clean_query = urlencode(kept, doseq=True)
+    clean_url = urlunparse(parsed._replace(query=clean_query))
+    return clean_url, video_id
+
+
 def extract_media_id(url: str) -> str:
     """
     Стабильный ID для имени файла:
+    - query video_id → его значение (если валидно)
     - YouTube → video id
     - playprofi/media → сегмент пути (например 20075a5c)
     - иначе → md5 от URL
     """
+    _, query_video_id = strip_query_video_id(url)
+    if query_video_id and _VIDEO_ID_RE.fullmatch(query_video_id):
+        return query_video_id
+
     youtube_id = extract_youtube_id(url)
     if youtube_id:
         return youtube_id
@@ -68,6 +96,18 @@ def extract_media_id(url: str) -> str:
             return stem
 
     return hashlib.md5(url.encode("utf-8")).hexdigest()[:12]
+
+
+def resolve_media_ref(url: str) -> Tuple[str, str]:
+    """
+    Готовит URL к скачиванию и ID для имён файлов.
+    Returns:
+        (clean_url без query video_id, media_id)
+    """
+    clean_url, query_video_id = strip_query_video_id(url)
+    if query_video_id and _VIDEO_ID_RE.fullmatch(query_video_id):
+        return clean_url, query_video_id
+    return clean_url, extract_media_id(clean_url)
 
 
 def guess_extension_from_url(url: str, default: str = ".mp4") -> str:
